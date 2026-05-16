@@ -14,8 +14,3 @@ Rules:
 
 Project scope :
 - Batch Writes
-- WAL
-- MemTable
-- SStable
-- Compaction
-- Manifest file
