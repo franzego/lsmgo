@@ -14,7 +14,7 @@ const (
 	OpTypeDelete                byte = 2
 )
 
-var headerLength int = 12 // 8 for seqNum, 4 for count
+const headerLength = 12 // 8 for seqNum, 4 for count
 var ErrEmptyKey = errors.New("batch: empty key")
 
 func (b *Batch) Put(key, value []byte) error {
@@ -36,9 +36,37 @@ func (b *Batch) Put(key, value []byte) error {
 	copy(b.data[offset+9:offset+9+len(key)], key)
 	copy(b.data[offset+9+len(key):], value)
 
-	b.Count++
-	binary.LittleEndian.PutUint32(b.data[8:12], uint32(b.Count))
+	c := b.count()
+	c++
+	b.SetCount(c)
 	return nil
+}
+
+// count provides a single source of truth for getting the number of items[key value pairs]/ operations that
+// have been done in the batch.
+func (b *Batch) count() uint32 {
+	if len(b.data) < headerLength {
+		return 0
+	}
+	return binary.LittleEndian.Uint32(b.data[8:12])
+}
+func (b *Batch) SetCount(count uint32) {
+	b.ensureHeader()
+	binary.LittleEndian.PutUint32(b.data[8:12], count)
+}
+
+func (b *Batch) SeqNum() uint64 {
+	if len(b.data) < headerLength {
+		return 0
+	}
+	return binary.LittleEndian.Uint64(b.data[0:8])
+}
+
+// SetSeqNum is what the db.Write() will call at the commit time - right before
+// handing over to write to the WAL.
+func (b *Batch) SetSeqNum(seq uint64) {
+	b.ensureHeader()
+	binary.LittleEndian.PutUint64(b.data[0:8], seq)
 }
 
 // Repr is to return the raw bytes that had been saved to the batch. This is to
@@ -52,7 +80,12 @@ func (b *Batch) Repr() []byte {
 // Let it be here for now.
 func BatchFromRepr(data []byte) *Batch {
 	b := batchPool.Get().(*Batch)
-	b.data = data
+	if len(data) < headerLength {
+		b.init(headerLength)
+		copy(b.data, data)
+		return b
+	}
+	b.data = append([]byte(nil), data...)
 	return b
 }
 
@@ -116,7 +149,11 @@ func newBatch(opts ...OptionBatch) *Batch {
 func newBatchWithSize(size int, opts ...OptionBatch) *Batch {
 	b := newBatch(opts...)
 	if cap(b.data) < size {
-		b.data = make([]byte, size)
+		n := b.opts.initialSizeBytes
+		for n < size {
+			n *= 2
+		}
+		b.data = make([]byte, size, n)
 	} else {
 		b.data = b.data[:size]
 	}
@@ -157,6 +194,12 @@ func (b *Batch) grow(size int) {
 	b.data = next
 }
 
+func (b *Batch) ensureHeader() {
+	if len(b.data) < headerLength {
+		b.init(headerLength)
+	}
+}
+
 type batchInternal struct {
 	// batchSeqNum uint64 // this is a sequence number for every op that is carried out.
 	// count      uint64 // number of items in a batch
@@ -171,5 +214,4 @@ type batchInternal struct {
 type Batch struct {
 	batchInternal
 	Applied atomic.Bool
-	Count   uint64
 }
