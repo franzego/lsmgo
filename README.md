@@ -14,6 +14,6 @@ instructive to have. Why? Because it clearly exposes the limitations of the one 
 a fsync to guarantee durability — and fsync is expensive. It forces the OS to flush its write buffers all the way to the physical disk. On a typical NVMe drive that's maybe 100-200 microseconds per fsync. 
 Do that per key and your throughput ceiling is maybe 5,000-10,000 writes per second regardless of how fast everything else is. Batching changes the math entirely. You take 10 (or 100, or 1000) key-value pairs, 
 write them all to the WAL in one sequential append, do one fsync, then apply all of them to the MemTable. The fsync cost is now amortized across the entire batch. This is much more efficient. It is the foundation
-of the entire protoype.
+of the entire prototype. In this prototype a batch pool was introduced. This reduces the GC pressure as Batches are constantly created and discarded.
 2. **WAL(Write Ahead Log):** 
 
