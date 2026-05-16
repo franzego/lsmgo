@@ -83,3 +83,24 @@ func TestPutEncodesRecordAndUpdatesCount(t *testing.T) {
 	}
 }
 
+func TestGrowExceedingCapacityResizesAndPreservesData(t *testing.T) {
+	b := newBatchWithSize(headerLength, WithInitializeSizeBytes(16))
+	copy(b.data, []byte("abcdefghijkl")) // 12 bytes
+
+	oldCap := cap(b.data)
+	target := oldCap + 64 // force growth beyond current capacity
+	b.grow(target)
+
+	if len(b.data) != target {
+		t.Fatalf("len=%d, want %d", len(b.data), target)
+	}
+	if cap(b.data) < target {
+		t.Fatalf("cap=%d, want at least %d", cap(b.data), target)
+	}
+	if cap(b.data) <= oldCap {
+		t.Fatalf("cap did not grow: old=%d new=%d", oldCap, cap(b.data))
+	}
+	if got := string(b.data[:headerLength]); got != "abcdefghijkl" {
+		t.Fatalf("data prefix changed: got %q", got)
+	}
+}
