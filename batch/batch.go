@@ -41,11 +41,23 @@ func (b *Batch) Put(key, value []byte) error {
 	return nil
 }
 
-// delete
-// serialization
+// Repr is to return the raw bytes that had been saved to the batch. This is to
+// be called when the WAL needs the raw bytes.
+func (b *Batch) Repr() []byte {
+	return b.data
+}
 
-// batchPool helps reuse batches after they have been closed or freed. This prevents GC pressure of having to keep
-// creating batches all the time.
+// BatchFromRepr on the recovery side ensures the WAL reader reassembles the raw
+// bytes from physical records and the batch layer reconstructs from those bytes.
+// Let it be here for now.
+func BatchFromRepr(data []byte) *Batch {
+	b := batchPool.Get().(*Batch)
+	b.data = data
+	return b
+}
+
+// batchPool helps reuse batches after they have been closed or freed. This
+// prevents GC pressure of having to keep creating batches all the time.
 var batchPool = sync.Pool{
 	New: func() interface{} {
 		return &Batch{}
@@ -146,7 +158,7 @@ func (b *Batch) grow(size int) {
 }
 
 type batchInternal struct {
-	// batchSeqNum uint64 // this is a sequence number for every op that is carried out. it
+	// batchSeqNum uint64 // this is a sequence number for every op that is carried out.
 	// count      uint64 // number of items in a batch
 	data       []byte //this will contain the seqNum and the count for the operations (set, deletee)
 	committing bool   // set to true when a batch starts committing.
