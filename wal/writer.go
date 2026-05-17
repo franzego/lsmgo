@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 )
 
+// Write takes the batch entries and write them to the wal.
 func (w *WAL) Write(batchData []byte, rt RecordType) error {
 	// build the record file that will be written to the disk (WAL)
 	checksum := computeChecksum(rt, batchData)
@@ -15,5 +16,4 @@ func (w *WAL) Write(batchData []byte, rt RecordType) error {
 	copy(record[0:7], header)
 	copy(record[7:], batchData)
 
-	return nil
 }
