@@ -34,7 +34,7 @@ func dirExists(path string) bool {
 
 func Open(dirpath string, walNum uint32) (*WAL, error) {
 	if !dirExists(dirpath) {
-		if err := os.Mkdir(dirpath, 0644); err != nil {
+		if err := os.Mkdir(dirpath, 0755); err != nil {
 			return nil, err
 		}
 	}
@@ -49,10 +49,12 @@ func Open(dirpath string, walNum uint32) (*WAL, error) {
 		return nil, err
 	}
 	return &WAL{
-		file:    file,
-		walNum:  walNum,
-		dir:     directory,
-		dirname: dirpath,
+		fs:          nil,
+		file:        file,
+		walNum:      walNum,
+		dir:         directory,
+		dirname:     dirpath,
+		blockOffset: 0,
 	}, nil
 }
 
