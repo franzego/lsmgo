@@ -1,0 +1,288 @@
+package wal
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+)
+
+type physicalRecord struct {
+	rt   RecordType
+	data []byte
+}
+
+func parsePhysicalRecords(raw []byte) ([]physicalRecord, error) {
+	var recs []physicalRecord
+	offset := 0
+
+	for offset < len(raw) {
+		remainInBlock := blockSize - (offset % blockSize)
+		if remainInBlock < headerSize {
+			for i := 0; i < remainInBlock && offset+i < len(raw); i++ {
+				if raw[offset+i] != 0 {
+					return nil, errors.New("non-zero padding bytes")
+				}
+			}
+			offset += remainInBlock
+			continue
+		}
+
+		if offset+headerSize > len(raw) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		h := raw[offset : offset+headerSize]
+		checksum := binary.LittleEndian.Uint32(h[0:4])
+		payloadLen := int(binary.LittleEndian.Uint16(h[4:6]))
+		rt := RecordType(h[6])
+		offset += headerSize
+
+		if offset+payloadLen > len(raw) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		payload := raw[offset : offset+payloadLen]
+		offset += payloadLen
+
+		if got := computeChecksum(rt, payload); got != checksum {
+			return nil, errors.New("checksum mismatch")
+		}
+		recs = append(recs, physicalRecord{rt: rt, data: append([]byte(nil), payload...)})
+	}
+	return recs, nil
+}
+
+func TestWriteLogEntrySingleRecord(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	payload := []byte("hello-wal")
+	if err := w.WriteLogEntry(payload); err != nil {
+		t.Fatalf("write log entry: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "wal", "000001.log"))
+	if err != nil {
+		t.Fatalf("read wal file: %v", err)
+	}
+	recs, err := parsePhysicalRecords(b)
+	if err != nil {
+		t.Fatalf("parse wal: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	if recs[0].rt != RecordFull {
+		t.Fatalf("expected RecordFull, got %d", recs[0].rt)
+	}
+	if string(recs[0].data) != string(payload) {
+		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestWriteLogEntryFragmentedAcrossBlocks(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	payload := make([]byte, blockSize*2+123)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	if err := w.WriteLogEntry(payload); err != nil {
+		t.Fatalf("write large log entry: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "wal", "000001.log"))
+	if err != nil {
+		t.Fatalf("read wal file: %v", err)
+	}
+	recs, err := parsePhysicalRecords(b)
+	if err != nil {
+		t.Fatalf("parse wal: %v", err)
+	}
+	if len(recs) < 2 {
+		t.Fatalf("expected fragmented records, got %d", len(recs))
+	}
+	if recs[0].rt != RecordFirst {
+		t.Fatalf("expected first record to be RecordFirst, got %d", recs[0].rt)
+	}
+	if recs[len(recs)-1].rt != RecordLast {
+		t.Fatalf("expected last record to be RecordLast, got %d", recs[len(recs)-1].rt)
+	}
+	for i := 1; i < len(recs)-1; i++ {
+		if recs[i].rt != RecordMiddle {
+			t.Fatalf("expected middle fragment at index %d, got %d", i, recs[i].rt)
+		}
+	}
+
+	combined := make([]byte, 0, len(payload))
+	for _, r := range recs {
+		combined = append(combined, r.data...)
+	}
+	if len(combined) != len(payload) {
+		t.Fatalf("reassembled length mismatch: got %d want %d", len(combined), len(payload))
+	}
+	for i := range combined {
+		if combined[i] != payload[i] {
+			t.Fatalf("payload mismatch at byte %d", i)
+		}
+	}
+}
+
+func TestOpenRestoresBlockOffsetNearBoundary(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	w, err := Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+
+	// write a record that leaves less than header bytes in the current block
+	nearBoundary := make([]byte, blockSize-headerSize-3)
+	if err := w.WriteLogEntry(nearBoundary); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+
+	w2, err := Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	if err := w2.WriteLogEntry([]byte("next")); err != nil {
+		t.Fatalf("second write after reopen: %v", err)
+	}
+	if err := w2.Close(); err != nil {
+		t.Fatalf("close wal2: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(walDir, "000001.log"))
+	if err != nil {
+		t.Fatalf("read wal file: %v", err)
+	}
+	recs, err := parsePhysicalRecords(b)
+	if err != nil {
+		t.Fatalf("parse wal: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(recs))
+	}
+}
+
+func TestParseWALName(t *testing.T) {
+	tests := []struct {
+		dir    string
+		num    uint32
+		expect string
+	}{
+		{dir: "/tmp/wal", num: 1, expect: "/tmp/wal/000001.log"},
+		{dir: "/tmp/wal", num: 42, expect: "/tmp/wal/000042.log"},
+		{dir: "/tmp/wal", num: 123456, expect: "/tmp/wal/123456.log"},
+	}
+
+	for _, tt := range tests {
+		got := parseWALName(tt.dir, tt.num)
+		if got != tt.expect {
+			t.Fatalf("parseWALName(%q,%d)=%q want %q", tt.dir, tt.num, got, tt.expect)
+		}
+	}
+}
+
+func TestConcurrentWriteLogEntryNoCorruption(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	const writers = 64
+	var wg sync.WaitGroup
+	wg.Add(writers)
+
+	for i := 0; i < writers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			payload := []byte(fmt.Sprintf("writer-%03d", i))
+			if err := w.WriteLogEntry(payload); err != nil {
+				t.Errorf("write %d failed: %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dir, "wal", "000001.log"))
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	recs, err := parsePhysicalRecords(b)
+	if err != nil {
+		t.Fatalf("parse wal: %v", err)
+	}
+	if len(recs) != writers {
+		t.Fatalf("record count mismatch: got %d want %d", len(recs), writers)
+	}
+
+	seen := make(map[string]bool, writers)
+	for _, r := range recs {
+		if r.rt != RecordFull {
+			t.Fatalf("expected RecordFull for tiny concurrent payload, got %d", r.rt)
+		}
+		seen[string(r.data)] = true
+	}
+	for i := 0; i < writers; i++ {
+		want := fmt.Sprintf("writer-%03d", i)
+		if !seen[want] {
+			t.Fatalf("missing payload %q", want)
+		}
+	}
+}
+
+func BenchmarkWALWriteLogEntry(b *testing.B) {
+	sizes := []int{128, 1024, 8 * 1024, 32 * 1024, 128 * 1024}
+	for _, size := range sizes {
+		b.Run(fmt.Sprintf("payload_%dB", size), func(b *testing.B) {
+			dir := b.TempDir()
+			w, err := Open(filepath.Join(dir, "wal"), 1)
+			if err != nil {
+				b.Fatalf("open wal: %v", err)
+			}
+			defer func() { _ = w.Close() }()
+
+			payload := make([]byte, size)
+			for i := range payload {
+				payload[i] = byte(i % 251)
+			}
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := w.WriteLogEntry(payload); err != nil {
+					b.Fatalf("write log entry: %v", err)
+				}
+			}
+		})
+	}
+}

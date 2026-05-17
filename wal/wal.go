@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/franzego/lsm-golang/fs"
 )
 
 type WAL struct {
+	mu          sync.Mutex
 	fs          fs.FS
 	file        *os.File
 	walNum      uint32

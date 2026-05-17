@@ -72,9 +72,11 @@ func (w *WAL) sync() error {
 }
 
 func (w *WAL) WriteLogEntry(data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	remaining := blockSize - w.blockOffset
 
-	// not enough space for even a header — pad and move to next block
+	// not enough space for even a header; pad and move to next block
 	if remaining < headerSize {
 		padding := make([]byte, remaining)
 		if _, err := w.writeAll(padding); err != nil {
