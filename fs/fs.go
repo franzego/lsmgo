@@ -7,5 +7,4 @@ type FS interface {
 	Rename(oldName, newName string) error
 	Remove(name string) error
 	RemoveAll(name string) error
-	Close() error
 }

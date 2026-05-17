@@ -21,22 +21,13 @@ func parseWALName(dir string, walNum uint32) string {
 	return filepath.Join(dir, fmt.Sprintf("%06d.log", walNum))
 }
 
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-		return false
-	}
-	return info.IsDir() // true only if it's a directory, not a file
+func Open(dirpath string, walNum uint32) (*WAL, error) {
+	return OpenWithFS(dirpath, walNum, fs.DefaultFS())
 }
 
-func Open(dirpath string, walNum uint32) (*WAL, error) {
-	if !dirExists(dirpath) {
-		if err := os.Mkdir(dirpath, 0755); err != nil {
-			return nil, err
-		}
+func OpenWithFS(dirpath string, walNum uint32, filesystem fs.FS) (*WAL, error) {
+	if err := filesystem.MkdirAll(dirpath, 0o755); err != nil {
+		return nil, err
 	}
 	directory, err := os.Open(dirpath)
 	if err != nil {
@@ -48,13 +39,21 @@ func Open(dirpath string, walNum uint32) (*WAL, error) {
 		directory.Close()
 		return nil, err
 	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		directory.Close()
+		return nil, err
+	}
+	blockOffset := int(info.Size() % blockSize)
+
 	return &WAL{
-		fs:          nil,
+		fs:          filesystem,
 		file:        file,
 		walNum:      walNum,
 		dir:         directory,
 		dirname:     dirpath,
-		blockOffset: 0,
+		blockOffset: blockOffset,
 	}, nil
 }
 
