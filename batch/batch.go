@@ -200,6 +200,13 @@ func (b *Batch) ensureHeader() {
 	}
 }
 
+// The header will be 12 bytes. It will contain the sequence number and the
+// count. The sequence number will be 8 bytes and the count 4 bytes. The optype
+// will be 1 therefore the data in the batchInternal struct will be the header
+// plus the optype plus the len(key) plus len(value) plus the raw bytes of the
+// key and value. The base is the header. With every Put() operation, the count
+// increases. The sequence number is only called once, when the batch is about to
+// be committed to the DB (in this case the WAL).
 type batchInternal struct {
 	// batchSeqNum uint64 // this is a sequence number for every op that is carried out.
 	// count      uint64 // number of items in a batch
