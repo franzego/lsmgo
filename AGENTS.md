@@ -15,3 +15,4 @@ Rules:
 Project scope :
 - Batch Writes
 - WAL
+- Memtable

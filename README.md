@@ -20,5 +20,16 @@ it is a log. An append only log. Right before the data goes into the memtable (t
 to the memtable, the state can be recovered by replaying the WAL. It uses direct I/O bypassing the os and directly writing to the disk. It may feel counter-intuitive to write to a "slow disk" before the memtables that
 are stored in the significantly faster DRAM. It is not. It is a sequential write, therefore the disk head just stays at the end of the file and keeps stremaing the files. No jumping around. It will definitely keep up the 
 network or application logic. WAL is a safety net. It prevents the ambiguities or confusion that could occur when power goes off at the memtable.
-3. **Memtable**
+3. **Memtable:** Now we are getting to meat of it all. Memtable is a very important building block. Simply put, this is what makes writes and reads - when the conditions are right - so quick. First thing to note is that it
+is a data structure held in memory(DRAM). It temporarily holds recent writes in memory before flushing them to SSTables(another important building block). In this prototype a skip-list was used as its underlying data structure.
+Why not a map ? Well, while maps have their strengths in O(1) time for insertion and deletion, they are usually unsorted. The real problem is that a flush - to the SSTable once the memtable has reached its threshold requires a 
+sorted iteration over all keys. A hash map can't give you that without a full sort at flush time, which is O(n log n) and defeats the purpose. The skip-list maintains sorted order continuously as you insert, so flush is just a
+linear scan — O(n). Skip-lists on the other hand offer this and is superior to Balanced BST (red-black tree) in that it offers a much easier time dealing with concurrent access as writes and reads happen simultaneously.
+When you perform a read operation, the database always starts from the newest date(the top of the active skip-list) and then works backward. Therefore, if there are two entries for a key, it only sees the most recent thereby 
+"shadowing" the earlier one. *LSMs do not do in-place deletes. An update is just a newer write for the same key. A delete operation is a special TOMBSTONE marker not an actual removal. The shadowing mechanism helps with both*
+Note that the various nodes in the skip-list are in various locations in DRAM, but since they hold pointers to the next node in the list in the DRAM, it is fine as opposed to a disk. On a disk, random I/O is far slower.
+So at flush time, the database does a single sorted scan of the skip-list and writes all key-value pairs sequentially to the SSTable thereby turning pointer-chased memory (caused by the random I/O) into a contiguous, sorted file. 
+This is the core trade-off of the LSM design: accept pointer indirection in memory to get sequential writes on disk. To read data, the flow is - check the active memtable, check the ones that are about to be flushed, SSTables on
+the disk from newest to oldest.
+
 
