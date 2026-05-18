@@ -16,6 +16,13 @@ type physicalRecord struct {
 	data []byte
 }
 
+type physicalRecordMeta struct {
+	start       int
+	payloadOff  int
+	payloadSize int
+	rt          RecordType
+}
+
 func parsePhysicalRecords(raw []byte) ([]physicalRecord, error) {
 	var recs []physicalRecord
 	offset := 0
@@ -53,6 +60,45 @@ func parsePhysicalRecords(raw []byte) ([]physicalRecord, error) {
 		recs = append(recs, physicalRecord{rt: rt, data: append([]byte(nil), payload...)})
 	}
 	return recs, nil
+}
+
+func parsePhysicalRecordMeta(raw []byte) ([]physicalRecordMeta, error) {
+	var recs []physicalRecordMeta
+	offset := 0
+	for offset < len(raw) {
+		remainInBlock := blockSize - (offset % blockSize)
+		if remainInBlock < headerSize {
+			offset += remainInBlock
+			continue
+		}
+		if offset+headerSize > len(raw) {
+			return recs, io.ErrUnexpectedEOF
+		}
+		start := offset
+		h := raw[offset : offset+headerSize]
+		payloadLen := int(binary.LittleEndian.Uint16(h[4:6]))
+		rt := RecordType(h[6])
+		offset += headerSize
+		if offset+payloadLen > len(raw) {
+			return recs, io.ErrUnexpectedEOF
+		}
+		recs = append(recs, physicalRecordMeta{
+			start:       start,
+			payloadOff:  offset,
+			payloadSize: payloadLen,
+			rt:          rt,
+		})
+		offset += payloadLen
+	}
+	return recs, nil
+}
+
+func makeReplayPayload(seq uint64, count uint32, body []byte) []byte {
+	p := make([]byte, 12+len(body))
+	binary.LittleEndian.PutUint64(p[0:8], seq)
+	binary.LittleEndian.PutUint32(p[8:12], count)
+	copy(p[12:], body)
+	return p
 }
 
 func TestWriteLogEntrySingleRecord(t *testing.T) {
@@ -284,5 +330,161 @@ func BenchmarkWALWriteLogEntry(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestReplayStopsOnTruncatedTailNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	w, err := Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	if err := w.WriteLogEntry(makeReplayPayload(1, 1, []byte("ok"))); err != nil {
+		t.Fatalf("write entry: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Append incomplete header bytes to simulate crash-tail truncation.
+	f, err := os.OpenFile(filepath.Join(walDir, "000001.log"), os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open wal for append: %v", err)
+	}
+	if _, err := f.Write([]byte{1, 2, 3}); err != nil {
+		t.Fatalf("append partial tail: %v", err)
+	}
+	_ = f.Close()
+
+	w2, err := Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	defer func() { _ = w2.Close() }()
+
+	var got int
+	stats, err := w2.Replay(func(e *LogEntry) error {
+		got++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("replay err: %v", err)
+	}
+	if got != 1 || stats.RecordsReplayed != 1 {
+		t.Fatalf("expected 1 replayed record, got=%d stats=%d", got, stats.RecordsReplayed)
+	}
+	if stats.StopReason != "truncated_tail" {
+		t.Fatalf("expected stop reason truncated_tail, got %q", stats.StopReason)
+	}
+}
+
+func TestReplayChecksumMismatchTailNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	w, err := Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	if err := w.WriteLogEntry(makeReplayPayload(1, 1, []byte("first"))); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	if err := w.WriteLogEntry(makeReplayPayload(2, 1, []byte("second"))); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	path := filepath.Join(walDir, "000001.log")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	meta, err := parsePhysicalRecordMeta(raw)
+	if err != nil {
+		t.Fatalf("parse meta: %v", err)
+	}
+	last := meta[len(meta)-1]
+	raw[last.payloadOff] ^= 0xFF
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write wal: %v", err)
+	}
+
+	w2, err := Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	defer func() { _ = w2.Close() }()
+
+	var got int
+	stats, err := w2.Replay(func(e *LogEntry) error {
+		got++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("replay err: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("expected only first entry replayed, got %d", got)
+	}
+	if stats.StopReason != "checksum_mismatch_tail" {
+		t.Fatalf("expected checksum_mismatch_tail, got %q", stats.StopReason)
+	}
+}
+
+func TestReplayChecksumMismatchMiddleFatal(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	w, err := Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		if err := w.WriteLogEntry(makeReplayPayload(uint64(i), 1, []byte(fmt.Sprintf("entry-%d", i)))); err != nil {
+			t.Fatalf("write entry %d: %v", i, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	path := filepath.Join(walDir, "000001.log")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	meta, err := parsePhysicalRecordMeta(raw)
+	if err != nil {
+		t.Fatalf("parse meta: %v", err)
+	}
+	if len(meta) < 3 {
+		t.Fatalf("expected at least 3 physical records")
+	}
+	mid := meta[1]
+	raw[mid.payloadOff] ^= 0xAA
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write wal: %v", err)
+	}
+
+	w2, err := Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	defer func() { _ = w2.Close() }()
+
+	var got int
+	_, err = w2.Replay(func(e *LogEntry) error {
+		got++
+		return nil
+	})
+	if err == nil {
+		t.Fatalf("expected fatal corruption error")
+	}
+	if !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("expected ErrCorruptRecord, got %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("expected replay to stop at middle corruption after 1 entry, got %d", got)
 	}
 }

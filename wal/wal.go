@@ -12,11 +12,19 @@ import (
 type WAL struct {
 	mu          sync.Mutex
 	fs          fs.FS
-	file        *os.File
+	file        fileLike
 	walNum      uint32
-	dir         *os.File
+	dir         fileLike
 	dirname     string
 	blockOffset int // current position within the 32KB block
+}
+
+type fileLike interface {
+	Sync() error
+	Close() error
+	Write(p []byte) (n int, err error)
+	ReadAt(p []byte, off int64) (n int, err error)
+	Stat() (os.FileInfo, error)
 }
 
 func parseWALName(dir string, walNum uint32) string {
@@ -31,12 +39,12 @@ func OpenWithFS(dirpath string, walNum uint32, filesystem fs.FS) (*WAL, error) {
 	if err := filesystem.MkdirAll(dirpath, 0o755); err != nil {
 		return nil, err
 	}
-	directory, err := os.Open(dirpath)
+	directory, err := filesystem.Open(dirpath)
 	if err != nil {
 		return nil, err
 	}
 	wal := parseWALName(dirpath, walNum)
-	file, err := os.OpenFile(wal, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	file, err := filesystem.OpenFile(wal, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		directory.Close()
 		return nil, err
