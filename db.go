@@ -21,6 +21,17 @@ func Open(w *wal.WAL) *DB {
 	return &DB{wal: w}
 }
 
+// OpenWithRecovery builds a DB and immediately replays the WAL.
+// The apply callback is invoked for each recovered log entry in replay order.
+func OpenWithRecovery(w *wal.WAL, apply func(*wal.LogEntry) error) (*DB, wal.ReplayStats, error) {
+	db := Open(w)
+	stats, err := db.Recover(apply)
+	if err != nil {
+		return nil, stats, err
+	}
+	return db, stats, nil
+}
+
 func (d *DB) Write(b *batch.Batch) error {
 	if b == nil {
 		return ErrNilBatch
@@ -36,4 +47,28 @@ func (d *DB) Write(b *batch.Batch) error {
 	}
 	b.Applied.Store(true)
 	return nil
+}
+
+// Recover replays WAL entries and restores DB sequence state.
+// It is safe to call with apply == nil when only sequence restoration is needed.
+func (d *DB) Recover(apply func(*wal.LogEntry) error) (wal.ReplayStats, error) {
+	if d.wal == nil {
+		return wal.ReplayStats{}, ErrWALNotConfigured
+	}
+
+	var maxSeq uint64
+	stats, err := d.wal.Replay(func(e *wal.LogEntry) error {
+		if e.SeqNum > maxSeq {
+			maxSeq = e.SeqNum
+		}
+		if apply != nil {
+			return apply(e)
+		}
+		return nil
+	})
+	if err != nil {
+		return stats, err
+	}
+	d.seqNum.Store(maxSeq)
+	return stats, nil
 }

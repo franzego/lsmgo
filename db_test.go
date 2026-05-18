@@ -1,7 +1,10 @@
 package lsm
 
 import (
+	"encoding/binary"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -40,5 +43,121 @@ func TestDBWriteNilBatch(t *testing.T) {
 	db := Open(nil)
 	if err := db.Write(nil); !errors.Is(err, ErrNilBatch) {
 		t.Fatalf("expected ErrNilBatch, got %v", err)
+	}
+}
+
+func makeBatchRepr(t *testing.T, key, val string) []byte {
+	t.Helper()
+	var b batch.Batch
+	if err := b.Put([]byte(key), []byte(val)); err != nil {
+		t.Fatalf("batch put: %v", err)
+	}
+	return append([]byte(nil), b.Repr()...)
+}
+
+func setSeqNumOnBatchRepr(raw []byte, seq uint64) []byte {
+	out := append([]byte(nil), raw...)
+	binary.LittleEndian.PutUint64(out[0:8], seq)
+	return out
+}
+
+func TestOpenWithRecovery_ReplaysEntriesAndRestoresSequence(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	w, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+
+	one := setSeqNumOnBatchRepr(makeBatchRepr(t, "k1", "v1"), 7)
+	two := setSeqNumOnBatchRepr(makeBatchRepr(t, "k2", "v2"), 8)
+	if err := w.WriteLogEntry(one); err != nil {
+		t.Fatalf("write one: %v", err)
+	}
+	if err := w.WriteLogEntry(two); err != nil {
+		t.Fatalf("write two: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+
+	w2, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+
+	var seen []uint64
+	db, stats, err := OpenWithRecovery(w2, func(e *wal.LogEntry) error {
+		seen = append(seen, e.SeqNum)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("open with recovery: %v", err)
+	}
+	if len(seen) != 2 || seen[0] != 7 || seen[1] != 8 {
+		t.Fatalf("replay order/seq mismatch: got %v", seen)
+	}
+	if stats.RecordsReplayed != 2 {
+		t.Fatalf("expected 2 replayed, got %d", stats.RecordsReplayed)
+	}
+
+	var next batch.Batch
+	if err := next.Put([]byte("k3"), []byte("v3")); err != nil {
+		t.Fatalf("batch put next: %v", err)
+	}
+	if err := db.Write(&next); err != nil {
+		t.Fatalf("db write after recovery: %v", err)
+	}
+	if got := next.SeqNum(); got != 9 {
+		t.Fatalf("expected next seq=9 after recovery, got %d", got)
+	}
+}
+
+func TestOpenWithRecovery_FailsOnMiddleFileCorruption(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	w, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		payload := setSeqNumOnBatchRepr(makeBatchRepr(t, fmt.Sprintf("k%d", i), "v"), uint64(i))
+		if err := w.WriteLogEntry(payload); err != nil {
+			t.Fatalf("write entry %d: %v", i, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+
+	path := filepath.Join(walDir, "000001.log")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	// Flip one byte in the second record payload area (middle corruption).
+	// First record occupies: header(7)+payloadLen. So second record payload starts
+	// at: firstRecordEnd + header(7).
+	firstPayloadLen := int(binary.LittleEndian.Uint16(raw[4:6]))
+	firstRecordEnd := 7 + firstPayloadLen
+	secondPayloadOff := firstRecordEnd + 7
+	raw[secondPayloadOff] ^= 0xFF
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("rewrite wal: %v", err)
+	}
+
+	w2, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+
+	_, _, err = OpenWithRecovery(w2, nil)
+	if err == nil {
+		t.Fatalf("expected fatal recovery error for middle corruption")
+	}
+	if !errors.Is(err, wal.ErrCorruptRecord) {
+		t.Fatalf("expected wal.ErrCorruptRecord, got %v", err)
 	}
 }
