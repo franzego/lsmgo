@@ -37,12 +37,83 @@ func TestDBWriteAssignsSeqAndMarksApplied(t *testing.T) {
 	if !b.Applied.Load() {
 		t.Fatalf("expected batch to be marked applied")
 	}
+	if got := db.mem.Len(); got != 1 {
+		t.Fatalf("expected memtable len=1, got %d", got)
+	}
 }
 
 func TestDBWriteNilBatch(t *testing.T) {
 	db := Open(nil)
 	if err := db.Write(nil); !errors.Is(err, ErrNilBatch) {
 		t.Fatalf("expected ErrNilBatch, got %v", err)
+	}
+}
+
+func TestDBWriteMultiOpBatchUsesRangeStartSeq(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w)
+
+	var first batch.Batch
+	if err := first.Put([]byte("a"), []byte("1")); err != nil {
+		t.Fatalf("put first: %v", err)
+	}
+	if err := first.Put([]byte("b"), []byte("2")); err != nil {
+		t.Fatalf("put first: %v", err)
+	}
+	if err := first.Put([]byte("c"), []byte("3")); err != nil {
+		t.Fatalf("put first: %v", err)
+	}
+	if err := db.Write(&first); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	if got := first.SeqNum(); got != 1 {
+		t.Fatalf("expected first batch start seq=1, got %d", got)
+	}
+
+	var second batch.Batch
+	if err := second.Put([]byte("d"), []byte("4")); err != nil {
+		t.Fatalf("put second: %v", err)
+	}
+	if err := second.Put([]byte("e"), []byte("5")); err != nil {
+		t.Fatalf("put second: %v", err)
+	}
+	if err := db.Write(&second); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	if got := second.SeqNum(); got != 4 {
+		t.Fatalf("expected second batch start seq=4, got %d", got)
+	}
+	if got := db.mem.Len(); got != 5 {
+		t.Fatalf("expected memtable len=5, got %d", got)
+	}
+}
+
+func TestDBWriteRejectsCorruptBatchPayload(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w)
+
+	var valid batch.Batch
+	if err := valid.Put([]byte("k"), []byte("v")); err != nil {
+		t.Fatalf("put valid: %v", err)
+	}
+	corrupt := batch.BatchFromRepr(valid.Repr()[:len(valid.Repr())-1])
+	t.Cleanup(corrupt.Reset)
+
+	err = db.Write(corrupt)
+	if !errors.Is(err, ErrCorruptBatch) {
+		t.Fatalf("expected ErrCorruptBatch, got %v", err)
 	}
 }
 
@@ -111,6 +182,55 @@ func TestOpenWithRecovery_ReplaysEntriesAndRestoresSequence(t *testing.T) {
 	}
 	if got := next.SeqNum(); got != 9 {
 		t.Fatalf("expected next seq=9 after recovery, got %d", got)
+	}
+}
+
+func TestOpenWithRecovery_UsesSeqRangeFromCount(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	w, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+
+	var b batch.Batch
+	if err := b.Put([]byte("k1"), []byte("v1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := b.Put([]byte("k2"), []byte("v2")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := b.Put([]byte("k3"), []byte("v3")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	b.SetSeqNum(10) // means op seq range is 10..12 when Count=3
+	if err := w.WriteLogEntry(b.Repr()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+
+	w2, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+
+	db, _, err := OpenWithRecovery(w2, nil)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+
+	var next batch.Batch
+	if err := next.Put([]byte("kn"), []byte("vn")); err != nil {
+		t.Fatalf("put next: %v", err)
+	}
+	if err := db.Write(&next); err != nil {
+		t.Fatalf("write next: %v", err)
+	}
+	if got := next.SeqNum(); got != 13 {
+		t.Fatalf("expected next start seq=13, got %d", got)
 	}
 }
 
