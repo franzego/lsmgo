@@ -3,7 +3,6 @@ package batch
 import (
 	"encoding/binary"
 	"errors"
-	"sync"
 	"sync/atomic"
 )
 
@@ -79,7 +78,7 @@ func (b *Batch) Repr() []byte {
 // bytes from physical records and the batch layer reconstructs from those bytes.
 // Let it be here for now.
 func BatchFromRepr(data []byte) *Batch {
-	b := batchPool.Get().(*Batch)
+	b := &Batch{}
 	if len(data) < headerLength {
 		b.init(headerLength)
 		copy(b.data, data)
@@ -89,19 +88,10 @@ func BatchFromRepr(data []byte) *Batch {
 	return b
 }
 
-// batchPool helps reuse batches after they have been closed or freed. This
-// prevents GC pressure of having to keep creating batches all the time.
-var batchPool = sync.Pool{
-	New: func() interface{} {
-		return &Batch{}
-	},
-}
-
 func (b *Batch) Reset() {
 	b.batchInternal = batchInternal{
-		data:       b.data,
-		committing: false,
-		opts:       b.opts,
+		data: b.data,
+		opts: b.opts,
 	}
 	b.Applied.Store(false)
 	if b.data != nil {
@@ -138,27 +128,7 @@ func (bo *batchOptions) ensureDefaults() {
 		bo.maxReuseSizeBytes = defaultBatchMaxRetainedSize
 	}
 }
-func newBatch(opts ...OptionBatch) *Batch {
-	b := batchPool.Get().(*Batch)
-	for _, opt := range opts {
-		opt(&b.opts)
-	}
-	b.opts.ensureDefaults()
-	return b
-}
-func newBatchWithSize(size int, opts ...OptionBatch) *Batch {
-	b := newBatch(opts...)
-	if cap(b.data) < size {
-		n := b.opts.initialSizeBytes
-		for n < size {
-			n *= 2
-		}
-		b.data = make([]byte, size, n)
-	} else {
-		b.data = b.data[:size]
-	}
-	return b
-}
+
 func (b *Batch) init(size int) {
 	b.opts.ensureDefaults()
 	n := b.opts.initialSizeBytes
@@ -212,14 +182,8 @@ func IsEmpty(data []byte) bool {
 // increases. The sequence number is only called once, when the batch is about to
 // be committed to the DB (in this case the WAL).
 type batchInternal struct {
-	// batchSeqNum uint64 // this is a sequence number for every op that is carried out.
-	// Count      uint64 // number of items in a batch
-	data       []byte //this will contain the seqNum and the Count for the operations (set, deletee)
-	committing bool   // set to true when a batch starts committing.
-	opts       batchOptions
-
-	// db *Db
-	// memTable size uint64
+	data []byte //this will contain the seqNum and the Count for the operations (set, deletee)
+	opts batchOptions
 }
 
 type Batch struct {

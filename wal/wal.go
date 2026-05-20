@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,7 +18,10 @@ type WAL struct {
 	dir         fileLike
 	dirname     string
 	blockOffset int // current position within the 32KB block
+	closed      bool
 }
+
+var ErrWALClosed = errors.New("wal: closed")
 
 type fileLike interface {
 	Sync() error
@@ -68,11 +72,20 @@ func OpenWithFS(dirpath string, walNum uint32, filesystem fs.FS) (*WAL, error) {
 }
 
 func (w *WAL) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil
+	}
 	if err := w.file.Sync(); err != nil {
 		return err
 	}
 	if err := w.file.Close(); err != nil {
 		return err
 	}
-	return w.dir.Close()
+	if err := w.dir.Close(); err != nil {
+		return err
+	}
+	w.closed = true
+	return nil
 }

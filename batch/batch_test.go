@@ -6,7 +6,7 @@ import (
 )
 
 func TestSetSeqNumOnEmptyBatchInitializesHeader(t *testing.T) {
-	b := newBatch()
+	var b Batch
 
 	b.SetSeqNum(42)
 
@@ -19,7 +19,7 @@ func TestSetSeqNumOnEmptyBatchInitializesHeader(t *testing.T) {
 }
 
 func TestSetCountOnEmptyBatchInitializesHeader(t *testing.T) {
-	b := newBatch()
+	var b Batch
 
 	b.SetCount(7)
 
@@ -50,7 +50,7 @@ func TestBatchFromReprCopiesInput(t *testing.T) {
 }
 
 func TestPutEncodesRecordAndUpdatesCount(t *testing.T) {
-	b := newBatch()
+	var b Batch
 	key := []byte("k1")
 	value := []byte("v1")
 
@@ -84,7 +84,9 @@ func TestPutEncodesRecordAndUpdatesCount(t *testing.T) {
 }
 
 func TestGrowExceedingCapacityResizesAndPreservesData(t *testing.T) {
-	b := newBatchWithSize(headerLength, WithInitializeSizeBytes(16))
+	var b Batch
+	b.opts.initialSizeBytes = 16
+	b.ensureHeader()
 	copy(b.data, []byte("abcdefghijkl")) // 12 bytes
 
 	oldCap := cap(b.data)

@@ -42,13 +42,14 @@ func (m *MemTable) ApplyPut(key, value []byte, seq uint64) {
 	defer m.mu.Unlock()
 
 	// Memtable owns immutable bytes; callers may reuse or mutate their buffers.
+	ownedKey := append([]byte(nil), key...)
 	m.list.Set(InternalKey{
-		UserKey: append([]byte(nil), key...),
+		UserKey: ownedKey,
 		SeqNum:  seq,
 		Kind:    KindPut,
 	}, Entry{
 		Key: InternalKey{
-			UserKey: append([]byte(nil), key...),
+			UserKey: ownedKey,
 			SeqNum:  seq,
 			Kind:    KindPut,
 		},

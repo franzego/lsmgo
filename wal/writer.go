@@ -74,6 +74,9 @@ func (w *WAL) sync() error {
 func (w *WAL) WriteLogEntry(data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		return ErrWALClosed
+	}
 	remaining := blockSize - w.blockOffset
 
 	// not enough space for even a header; pad and move to next block
