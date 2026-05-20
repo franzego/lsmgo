@@ -14,7 +14,7 @@ const (
 	OpTypeDelete                byte = 2
 )
 
-const headerLength = 12 // 8 for seqNum, 4 for count
+const headerLength = 12 // 8 for seqNum, 4 for Count
 var ErrEmptyKey = errors.New("batch: empty key")
 
 func (b *Batch) Put(key, value []byte) error {
@@ -36,15 +36,15 @@ func (b *Batch) Put(key, value []byte) error {
 	copy(b.data[offset+9:offset+9+len(key)], key)
 	copy(b.data[offset+9+len(key):], value)
 
-	c := b.count()
+	c := b.Count()
 	c++
 	b.SetCount(c)
 	return nil
 }
 
-// count provides a single source of truth for getting the number of items[key value pairs]/ operations that
+// Count provides a single source of truth for getting the number of items[key value pairs]/ operations that
 // have been done in the batch.
-func (b *Batch) count() uint32 {
+func (b *Batch) Count() uint32 {
 	if len(b.data) < headerLength {
 		return 0
 	}
@@ -108,7 +108,7 @@ func (b *Batch) Reset() {
 		if cap(b.data) > defaultBatchMaxRetainedSize { // no need for reuse. Just get rid of it with the GC.
 			b.data = nil
 		} else {
-			b.data = b.data[:12] //the idea is to have the seqNum occupy 8 bytes and the count occupy 4 bytes
+			b.data = b.data[:12] //the idea is to have the seqNum occupy 8 bytes and the Count occupy 4 bytes
 			clear(b.data)
 		}
 	}
@@ -200,17 +200,21 @@ func (b *Batch) ensureHeader() {
 	}
 }
 
+func IsEmpty(data []byte) bool {
+	return len(data) <= headerLength
+}
+
 // The header will be 12 bytes. It will contain the sequence number and the
-// count. The sequence number will be 8 bytes and the count 4 bytes. The optype
+// Count. The sequence number will be 8 bytes and the Count 4 bytes. The optype
 // will be 1 therefore the data in the batchInternal struct will be the header
 // plus the optype plus the len(key) plus len(value) plus the raw bytes of the
-// key and value. The base is the header. With every Put() operation, the count
+// key and value. The base is the header. With every Put() operation, the Count
 // increases. The sequence number is only called once, when the batch is about to
 // be committed to the DB (in this case the WAL).
 type batchInternal struct {
 	// batchSeqNum uint64 // this is a sequence number for every op that is carried out.
-	// count      uint64 // number of items in a batch
-	data       []byte //this will contain the seqNum and the count for the operations (set, deletee)
+	// Count      uint64 // number of items in a batch
+	data       []byte //this will contain the seqNum and the Count for the operations (set, deletee)
 	committing bool   // set to true when a batch starts committing.
 	opts       batchOptions
 

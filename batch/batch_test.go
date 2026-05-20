@@ -23,8 +23,8 @@ func TestSetCountOnEmptyBatchInitializesHeader(t *testing.T) {
 
 	b.SetCount(7)
 
-	if got := b.count(); got != 7 {
-		t.Fatalf("count()=%d, want 7", got)
+	if got := b.Count(); got != 7 {
+		t.Fatalf("Count()=%d, want 7", got)
 	}
 	if len(b.Repr()) < headerLength {
 		t.Fatalf("repr len=%d, want at least %d", len(b.Repr()), headerLength)
@@ -58,8 +58,8 @@ func TestPutEncodesRecordAndUpdatesCount(t *testing.T) {
 		t.Fatalf("Put returned error: %v", err)
 	}
 
-	if got := b.count(); got != 1 {
-		t.Fatalf("count()=%d, want 1", got)
+	if got := b.Count(); got != 1 {
+		t.Fatalf("Count()=%d, want 1", got)
 	}
 
 	repr := b.Repr()
