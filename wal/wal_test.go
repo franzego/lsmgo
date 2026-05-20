@@ -233,6 +233,34 @@ func TestOpenRestoresBlockOffsetNearBoundary(t *testing.T) {
 	}
 }
 
+func TestWriteAfterCloseReturnsErrWALClosed(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+	if err := w.WriteLogEntry([]byte("x")); !errors.Is(err, ErrWALClosed) {
+		t.Fatalf("expected ErrWALClosed, got %v", err)
+	}
+}
+
+func TestCloseIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	w, err := Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("first close wal: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("second close wal: %v", err)
+	}
+}
+
 func TestParseWALName(t *testing.T) {
 	tests := []struct {
 		dir    string

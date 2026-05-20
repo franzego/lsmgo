@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/franzego/lsm-golang/batch"
 	"github.com/franzego/lsm-golang/wal"
@@ -114,6 +115,71 @@ func TestDBWriteRejectsCorruptBatchPayload(t *testing.T) {
 	err = db.Write(corrupt)
 	if !errors.Is(err, ErrCorruptBatch) {
 		t.Fatalf("expected ErrCorruptBatch, got %v", err)
+	}
+}
+
+func TestDBWriteRejectsInvalidOpTypeBeforeWALPersist(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	w, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w)
+
+	var valid batch.Batch
+	if err := valid.Put([]byte("k"), []byte("v")); err != nil {
+		t.Fatalf("put valid: %v", err)
+	}
+
+	raw := append([]byte(nil), valid.Repr()...)
+	raw[12] = 99 // mutate op type byte
+	invalid := batch.BatchFromRepr(raw)
+	t.Cleanup(invalid.Reset)
+
+	err = db.Write(invalid)
+	if !errors.Is(err, ErrCorruptBatch) {
+		t.Fatalf("expected ErrCorruptBatch, got %v", err)
+	}
+	if invalid.Applied.Load() {
+		t.Fatalf("invalid batch should not be marked applied")
+	}
+
+	stats, err := w.Replay(func(e *wal.LogEntry) error { return nil })
+	if err != nil {
+		t.Fatalf("replay wal: %v", err)
+	}
+	if stats.RecordsReplayed != 0 {
+		t.Fatalf("expected no persisted records, got %d", stats.RecordsReplayed)
+	}
+}
+
+func TestDBWriteWALFailureDoesNotApplyMemtableOrMarkApplied(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	db := Open(w)
+	if err := w.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+
+	var b batch.Batch
+	if err := b.Put([]byte("k"), []byte("v")); err != nil {
+		t.Fatalf("put batch: %v", err)
+	}
+	err = db.Write(&b)
+	if !errors.Is(err, wal.ErrWALClosed) {
+		t.Fatalf("expected wal.ErrWALClosed, got %v", err)
+	}
+	if b.Applied.Load() {
+		t.Fatalf("batch should not be marked applied on WAL failure")
+	}
+	if got := db.mem.Len(); got != 0 {
+		t.Fatalf("expected memtable len=0 on WAL failure, got %d", got)
 	}
 }
 
@@ -279,5 +345,37 @@ func TestOpenWithRecovery_FailsOnMiddleFileCorruption(t *testing.T) {
 	}
 	if !errors.Is(err, wal.ErrCorruptRecord) {
 		t.Fatalf("expected wal.ErrCorruptRecord, got %v", err)
+	}
+}
+
+func TestRecoverSerializesWithDBMutex(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w)
+	db.mu.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = db.Recover(nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatalf("recover should block while db mutex is held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	db.mu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("recover did not resume after mutex release")
 	}
 }

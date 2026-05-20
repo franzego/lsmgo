@@ -3,7 +3,6 @@ package lsm
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -19,7 +18,6 @@ type DB struct {
 	seqNum  atomic.Uint64
 	wal     *wal.WAL
 	mem     *memtable.MemTable
-	BatchDb batch.Batch
 }
 
 var (
@@ -67,22 +65,24 @@ func (d *DB) Write(b *batch.Batch) error {
 	// WAL header sequence is the first op sequence in this batch's reserved range.
 	first := last - count + 1
 	b.SetSeqNum(first)
+	// Strict parse/validation runs before WAL append so corruption never becomes durable.
+	ops, err := parseBatchOps(b.Repr(), count32)
+	if err != nil {
+		return err
+	}
 	if err := d.wal.WriteLogEntry(b.Repr()); err != nil {
 		return err
 	}
-	if err := validateAndIterateBatchOps(b.Repr(), count32, first, func(opType byte, key, value []byte, seq uint64) error {
-		switch opType {
+	for i, op := range ops {
+		seq := first + uint64(i)
+		switch op.opType {
 		case batch.OpTypePut:
-			d.mem.ApplyPut(key, value, seq)
-			return nil
+			d.mem.ApplyPut(op.key, op.value, seq)
 		case batch.OpTypeDelete:
-			d.mem.ApplyDelete(key, seq)
-			return nil
+			d.mem.ApplyDelete(op.key, seq)
 		default:
 			return ErrCorruptBatch
 		}
-	}); err != nil {
-		return err
 	}
 
 	b.Applied.Store(true)
@@ -95,6 +95,8 @@ func (d *DB) Recover(apply func(*wal.LogEntry) error) (wal.ReplayStats, error) {
 	if d.wal == nil {
 		return wal.ReplayStats{}, ErrWALNotConfigured
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
 	var maxSeq uint64
 	stats, err := d.wal.Replay(func(e *wal.LogEntry) error {
@@ -118,38 +120,45 @@ func (d *DB) Recover(apply func(*wal.LogEntry) error) (wal.ReplayStats, error) {
 	return stats, nil
 }
 
-func validateAndIterateBatchOps(data []byte, count uint32, firstSeq uint64, fn func(opType byte, key, value []byte, seq uint64) error) error {
+type parsedOp struct {
+	opType byte
+	key    []byte
+	value  []byte
+}
+
+func parseBatchOps(data []byte, count uint32) ([]parsedOp, error) {
 	const batchHeaderLen = 12
 	const opHeaderLen = 9 // opType(1) + keyLen(4) + valueLen(4)
-
-	// Strict bounds checks make truncated/corrupt payloads fail closed before memtable mutation.
 	if len(data) < batchHeaderLen {
-		return ErrCorruptBatch
+		return nil, ErrCorruptBatch
 	}
 
+	ops := make([]parsedOp, 0, count)
 	off := batchHeaderLen
 	for i := uint32(0); i < count; i++ {
 		if off+opHeaderLen > len(data) {
-			return ErrCorruptBatch
+			return nil, ErrCorruptBatch
 		}
 		opType := data[off]
+		if opType != batch.OpTypePut && opType != batch.OpTypeDelete {
+			return nil, ErrCorruptBatch
+		}
 		keyLen := int(binary.LittleEndian.Uint32(data[off+1 : off+5]))
 		valLen := int(binary.LittleEndian.Uint32(data[off+5 : off+9]))
 		off += opHeaderLen
-
 		if off+keyLen+valLen > len(data) {
-			return ErrCorruptBatch
+			return nil, ErrCorruptBatch
 		}
 		key := data[off : off+keyLen]
 		off += keyLen
 		value := data[off : off+valLen]
 		off += valLen
-
-		seq := firstSeq + uint64(i)
-		if err := fn(opType, key, value, seq); err != nil {
-			return fmt.Errorf("batch op idx=%d: %w", i, err)
-		}
+		ops = append(ops, parsedOp{
+			opType: opType,
+			key:    key,
+			value:  value,
+		})
 	}
 
-	return nil
+	return ops, nil
 }
