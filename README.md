@@ -37,3 +37,11 @@ replaced with a new installation of a memtable. The old and used memtable is the
 check if the entry is there, then the memtable to be flushed is hit next and then the SSTables are after. Quite Interesting.
 
 
+## Resources That Helped
+- https://www.freecodecamp.org/news/build-an-lsm-tree-storage-engine-from-scratch-handbook/ Must read introduction to a memtable in golang.
+- https://skyzh.github.io/mini-lsm/week1-01-memtable.html A very helpful guide; written in Rust.
+- https://dave.cheney.net/2014/10/17/functional-options-for-friendly-apis A thorough guide on the functional options pattern in go.
+- https://www.oreilly.com/library/view/designing-data-intensive-applications/9781491903063/ chapter 3 on storage engines. It lays a perfect foundation on LSMs and other data structures but LSM was our interest this time.
+- https://github.com/cockroachdb/pebble The very inspiration and guide on most of my decisions. I borrowed and learnt a lot of techniques from this Repository. Took me time to navigate.
+
+
