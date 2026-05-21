@@ -48,7 +48,7 @@ func OpenWithFS(dirpath string, walNum uint32, filesystem fs.FS) (*WAL, error) {
 		return nil, err
 	}
 	wal := parseWALName(dirpath, walNum)
-	file, err := filesystem.OpenFile(wal, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	file, err := filesystem.OpenFile(wal, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 	if err != nil {
 		directory.Close()
 		return nil, err

@@ -2,7 +2,7 @@
 
 Log Search Merge Trees have become ubiquitous in today's database world. The name has become synonymous with "modern databases". It is the underlying structure behind databases like
 CassandraDB, CockroachDB, RocksDB, LevelDB, PebbleDB and the likes. One thing these have in common is their usage in write-heavy operations. The goal of LSMs, is to as much as possible
-and in as little time ingest writes at an unprecedented scale. It sacrifices read speed for this as nothing is ever free but even then some optimizations can make the tradeoff quite manageable.
+and in as little time ingest writes at an unprecedented scale. It sacrifices read speed for this as nothing is ever free but even then, some optimizations can make the tradeoff quite manageable.
 
 This repository is taking a dive into the internals of the data structures that powers this technology. LSM-trees have specific components that sustain it.
 Lsmgo is a prototype in golang. It will not have the production features as seen in the more powerful databases that inspired it, but the basic building blocks as much as possible,
@@ -14,7 +14,8 @@ instructive to have. Why? Because it clearly exposes the limitations of the one 
 a fsync to guarantee durability — and fsync is expensive. It forces the OS to flush its write buffers all the way to the physical disk. On a typical NVMe drive that's maybe 100-200 microseconds per fsync. 
 Do that per key and your throughput ceiling is maybe 5,000-10,000 writes per second regardless of how fast everything else is. Batching changes the math entirely. You take 10 (or 100, or 1000) key-value pairs, 
 write them all to the WAL in one sequential append, do one fsync, then apply all of them to the MemTable. The fsync cost is now amortized across the entire batch. This is much more efficient. It is the foundation
-of the entire prototype. In this prototype a batch pool was introduced. This reduces the GC pressure as Batches are constantly created and discarded.
+of the entire prototype. In this prototype a batch pool was to be used, but it added so much complexity. The idea was that pool reduces the GC pressure as Batches are constantly created and discarded, but then it only makes sense
+to be used when the need arises for it. In this prototype, there is no need for it. The scale does not require it.
 2. **WAL(Write Ahead Log):** The Write Ahead Log or WAL for short is simply the guard against loss of data. It basically ensures durability. After the batch insertion, the data is stored in a WAL. As the name suggests,
 it is a log. An append only log. Right before the data goes into the memtable (the primary write location in LSMs), it first has to be persisted here. This ensures that if the server crashed just before adding the data
 to the memtable, the state can be recovered by replaying the WAL. It uses direct I/O bypassing the os and directly writing to the disk. It may feel counter-intuitive to write to a "slow disk" before the memtables that
@@ -30,5 +31,5 @@ When you perform a read operation, the database always starts from the newest da
 Note that the various nodes in the skip-list are in various locations in DRAM, but since they hold pointers to the next node in the list in the DRAM, it is fine as opposed to a disk. On a disk, random I/O is far slower.
 So at flush time, the database does a single sorted scan of the skip-list and writes all key-value pairs sequentially to the SSTable thereby turning pointer-chased memory (caused by the random I/O) into a contiguous, sorted file. 
 This is the core trade-off of the LSM design: accept pointer indirection in memory to get sequential writes on disk. To read data, the flow is - check the active memtable, check the ones that are about to be flushed, SSTables on
-the disk from newest to oldest i.e the sequence numbers. A memtable key consist of: the userkey, the sequence/version number, the kind(put, tombstone)
+the disk from newest to oldest i.e the sequence numbers. A memtable key consist of: the userkey, the sequence/version number, the kind(put, tombstone).
 

@@ -25,9 +25,9 @@ func (b *Batch) Put(key, value []byte) error {
 		b.init(headerLength)
 	}
 
-	recordLen := int(OpTypePut) + 8 + len(key) + len(value) // keyLen(4) + valueLen(4) + key + value
+	batchOpLen := int(OpTypePut) + 8 + len(key) + len(value) // keyLen(4) + valueLen(4) + key + value
 	offset := len(b.data)
-	b.grow(offset + recordLen)
+	b.grow(offset + batchOpLen)
 
 	b.data[offset] = OpTypePut
 	binary.LittleEndian.PutUint32(b.data[offset+1:offset+5], uint32(len(key)))
@@ -142,24 +142,21 @@ func (b *Batch) init(size int) {
 	}
 }
 
-func (b *Batch) grow(size int) {
-	if cap(b.data) >= size {
-		b.data = b.data[:size]
+func (b *Batch) grow(length int) {
+	capBatch := cap(b.data)
+	if capBatch >= length {
+		b.data = b.data[:length]
 		return
 	}
 
-	capacity := cap(b.data)
-	if capacity == 0 {
-		capacity = b.opts.initialSizeBytes
-		if capacity <= 0 {
-			capacity = defaultBatchInitialSize
-		}
+	if capBatch == 0 {
+		capBatch = defaultBatchInitialSize
 	}
-	for capacity < size {
-		capacity *= 2
+	for capBatch < length {
+		capBatch *= 2
 	}
 
-	next := make([]byte, size, capacity)
+	next := make([]byte, length, capBatch)
 	copy(next, b.data)
 	b.data = next
 }

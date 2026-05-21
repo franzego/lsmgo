@@ -29,7 +29,7 @@ func parsePhysicalRecords(raw []byte) ([]physicalRecord, error) {
 
 	for offset < len(raw) {
 		remainInBlock := blockSize - (offset % blockSize)
-		if remainInBlock < headerSize {
+		if remainInBlock < recordHeaderSize {
 			for i := 0; i < remainInBlock && offset+i < len(raw); i++ {
 				if raw[offset+i] != 0 {
 					return nil, errors.New("non-zero padding bytes")
@@ -39,14 +39,14 @@ func parsePhysicalRecords(raw []byte) ([]physicalRecord, error) {
 			continue
 		}
 
-		if offset+headerSize > len(raw) {
+		if offset+recordHeaderSize > len(raw) {
 			return nil, io.ErrUnexpectedEOF
 		}
-		h := raw[offset : offset+headerSize]
+		h := raw[offset : offset+recordHeaderSize]
 		checksum := binary.LittleEndian.Uint32(h[0:4])
 		payloadLen := int(binary.LittleEndian.Uint16(h[4:6]))
 		rt := RecordType(h[6])
-		offset += headerSize
+		offset += recordHeaderSize
 
 		if offset+payloadLen > len(raw) {
 			return nil, io.ErrUnexpectedEOF
@@ -67,18 +67,18 @@ func parsePhysicalRecordMeta(raw []byte) ([]physicalRecordMeta, error) {
 	offset := 0
 	for offset < len(raw) {
 		remainInBlock := blockSize - (offset % blockSize)
-		if remainInBlock < headerSize {
+		if remainInBlock < recordHeaderSize {
 			offset += remainInBlock
 			continue
 		}
-		if offset+headerSize > len(raw) {
+		if offset+recordHeaderSize > len(raw) {
 			return recs, io.ErrUnexpectedEOF
 		}
 		start := offset
-		h := raw[offset : offset+headerSize]
+		h := raw[offset : offset+recordHeaderSize]
 		payloadLen := int(binary.LittleEndian.Uint16(h[4:6]))
 		rt := RecordType(h[6])
-		offset += headerSize
+		offset += recordHeaderSize
 		if offset+payloadLen > len(raw) {
 			return recs, io.ErrUnexpectedEOF
 		}
@@ -201,7 +201,7 @@ func TestOpenRestoresBlockOffsetNearBoundary(t *testing.T) {
 	}
 
 	// write a record that leaves less than header bytes in the current block
-	nearBoundary := make([]byte, blockSize-headerSize-3)
+	nearBoundary := make([]byte, blockSize-recordHeaderSize-3)
 	if err := w.WriteLogEntry(nearBoundary); err != nil {
 		t.Fatalf("first write: %v", err)
 	}

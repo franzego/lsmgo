@@ -5,8 +5,8 @@ import (
 )
 
 const (
-	blockSize  = 32 * 1024 // this is for the WAL
-	headerSize = 7
+	blockSize        = 32 * 1024 // this is for organisation in the WAL
+	recordHeaderSize = 7
 )
 
 type RecordType uint8

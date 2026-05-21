@@ -14,10 +14,10 @@ import (
 // DB serializes the write path so sequence assignment, WAL durability,
 // and memtable visibility share one commit order seen by all readers.
 type DB struct {
-	mu      sync.Mutex
-	seqNum  atomic.Uint64
-	wal     *wal.WAL
-	mem     *memtable.MemTable
+	mu     sync.Mutex
+	seqNum atomic.Uint64
+	wal    *wal.WAL
+	mem    *memtable.MemTable
 }
 
 var (
@@ -63,7 +63,7 @@ func (d *DB) Write(b *batch.Batch) error {
 	count := uint64(count32)
 	last := d.seqNum.Add(count)
 	// WAL header sequence is the first op sequence in this batch's reserved range.
-	first := last - count + 1
+	first := (last - count) + 1
 	b.SetSeqNum(first)
 	// Strict parse/validation runs before WAL append so corruption never becomes durable.
 	ops, err := parseBatchOps(b.Repr(), count32)
