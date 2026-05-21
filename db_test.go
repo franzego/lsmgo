@@ -183,6 +183,171 @@ func TestDBWriteWALFailureDoesNotApplyMemtableOrMarkApplied(t *testing.T) {
 	}
 }
 
+func TestDBGetReadsActiveMemtableAndCopiesValue(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w)
+	var b batch.Batch
+	if err := b.Put([]byte("k"), []byte("value")); err != nil {
+		t.Fatalf("put batch: %v", err)
+	}
+	if err := db.Write(&b); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, ok := db.Get([]byte("k"))
+	if !ok || string(got) != "value" {
+		t.Fatalf("Get(k)=(%q,%v), want value,true", got, ok)
+	}
+	got[0] = 'V'
+	gotAgain, ok := db.Get([]byte("k"))
+	if !ok || string(gotAgain) != "value" {
+		t.Fatalf("stored value changed through returned slice: got %q,%v", gotAgain, ok)
+	}
+}
+
+func TestDBGetReturnsNewestValueAndMissingKey(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w)
+	var first batch.Batch
+	if err := first.Put([]byte("k"), []byte("old")); err != nil {
+		t.Fatalf("put first: %v", err)
+	}
+	if err := db.Write(&first); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	var second batch.Batch
+	if err := second.Put([]byte("k"), []byte("new")); err != nil {
+		t.Fatalf("put second: %v", err)
+	}
+	if err := db.Write(&second); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+
+	got, ok := db.Get([]byte("k"))
+	if !ok || string(got) != "new" {
+		t.Fatalf("Get(k)=(%q,%v), want new,true", got, ok)
+	}
+	if got, ok := db.Get([]byte("missing")); ok {
+		t.Fatalf("Get(missing)=(%q,true), want false", got)
+	}
+}
+
+func TestDBGetTombstoneHidesOlderValue(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w, WithMemTableThresholdBytes(45))
+	var put batch.Batch
+	if err := put.Put([]byte("rotated"), []byte("large-value-for-rotation")); err != nil {
+		t.Fatalf("put batch: %v", err)
+	}
+	if err := db.Write(&put); err != nil {
+		t.Fatalf("write put: %v", err)
+	}
+	if got := len(db.immutables); got != 1 {
+		t.Fatalf("expected one immutable after put, got %d", got)
+	}
+
+	var del batch.Batch
+	if err := del.Delete([]byte("rotated")); err != nil {
+		t.Fatalf("delete batch: %v", err)
+	}
+	if err := db.Write(&del); err != nil {
+		t.Fatalf("write delete: %v", err)
+	}
+	if got, ok := db.Get([]byte("rotated")); ok {
+		t.Fatalf("deleted key returned %q", got)
+	}
+}
+
+func TestDBMemtableRotationKeepsImmutablesQueryable(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w, WithMemTableThresholdBytes(45))
+	var first batch.Batch
+	if err := first.Put([]byte("rotated"), []byte("large-value-for-rotation")); err != nil {
+		t.Fatalf("put first: %v", err)
+	}
+	if err := db.Write(&first); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	if got := len(db.immutables); got != 1 {
+		t.Fatalf("expected one immutable after rotation, got %d", got)
+	}
+	if got := db.mem.Len(); got != 0 {
+		t.Fatalf("expected new active memtable to be empty, got len=%d", got)
+	}
+	if got, ok := db.Get([]byte("rotated")); !ok || string(got) != "large-value-for-rotation" {
+		t.Fatalf("Get(rotated)=(%q,%v), want immutable value,true", got, ok)
+	}
+
+	var second batch.Batch
+	if err := second.Put([]byte("rotated"), []byte("new")); err != nil {
+		t.Fatalf("put second: %v", err)
+	}
+	if err := db.Write(&second); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	if got := db.mem.Len(); got != 1 {
+		t.Fatalf("expected later write to land in new active memtable, got len=%d", got)
+	}
+	if got, ok := db.Get([]byte("rotated")); !ok || string(got) != "new" {
+		t.Fatalf("Get(rotated)=(%q,%v), want active value,true", got, ok)
+	}
+}
+
+func TestDBGetPrefersNewestImmutable(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w, WithMemTableThresholdBytes(1))
+	var first batch.Batch
+	if err := first.Put([]byte("k"), []byte("old")); err != nil {
+		t.Fatalf("put first: %v", err)
+	}
+	if err := db.Write(&first); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	var second batch.Batch
+	if err := second.Put([]byte("k"), []byte("new")); err != nil {
+		t.Fatalf("put second: %v", err)
+	}
+	if err := db.Write(&second); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	if got := len(db.immutables); got != 2 {
+		t.Fatalf("expected two immutables, got %d", got)
+	}
+	if got, ok := db.Get([]byte("k")); !ok || string(got) != "new" {
+		t.Fatalf("Get(k)=(%q,%v), want newest immutable value,true", got, ok)
+	}
+}
+
 func makeBatchRepr(t *testing.T, key, val string) []byte {
 	t.Helper()
 	var b batch.Batch

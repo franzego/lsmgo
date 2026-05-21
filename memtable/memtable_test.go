@@ -32,3 +32,19 @@ func TestGetLatestReturnsTombstone(t *testing.T) {
 		t.Fatalf("expected tombstone kind, got %d", got.Key.Kind)
 	}
 }
+
+func TestApproxBytesAndReset(t *testing.T) {
+	m := NewMemtable()
+	m.ApplyPut([]byte("k"), []byte("value"), 1)
+	if got := m.ApproxBytes(); got <= 0 {
+		t.Fatalf("expected approximate bytes to increase, got %d", got)
+	}
+
+	m.Reset()
+	if got := m.Len(); got != 0 {
+		t.Fatalf("expected reset memtable len=0, got %d", got)
+	}
+	if got := m.ApproxBytes(); got != 0 {
+		t.Fatalf("expected reset approximate bytes=0, got %d", got)
+	}
+}

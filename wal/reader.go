@@ -54,7 +54,7 @@ func stopTail(stats ReplayStats, reason string, consumed int64) (ReplayStats, er
 // - err != nil: fatal I/O or structural error
 func readPhysicalRecord(f fileLike, fileSize int64, st *replayState, header []byte) (*recordRead, ReplayStats, bool, error) {
 	remainInBlock := int64(blockSize) - (st.offset % int64(blockSize))
-	if remainInBlock < int64(headerSize) {
+	if remainInBlock < int64(recordHeaderSize) {
 		// End-of-block padding region. If the file ends here, this is a crash-tail.
 		if st.offset+remainInBlock >= fileSize {
 			stats, err := stopTail(ReplayStats{}, "truncated_tail", fileSize)
@@ -64,7 +64,7 @@ func readPhysicalRecord(f fileLike, fileSize int64, st *replayState, header []by
 	}
 
 	recordStart := st.offset
-	if recordStart+int64(headerSize) > fileSize {
+	if recordStart+int64(recordHeaderSize) > fileSize {
 		stats, err := stopTail(ReplayStats{}, "truncated_tail", recordStart)
 		return nil, stats, true, err
 	}
@@ -77,7 +77,7 @@ func readPhysicalRecord(f fileLike, fileSize int64, st *replayState, header []by
 		}
 		return nil, ReplayStats{}, false, err
 	}
-	st.offset += int64(headerSize)
+	st.offset += int64(recordHeaderSize)
 
 	checksum := binary.LittleEndian.Uint32(header[0:4])
 	payloadLen := int64(binary.LittleEndian.Uint16(header[4:6]))
@@ -188,7 +188,7 @@ func (w *WAL) Replay(fn func(*LogEntry) error) (ReplayStats, error) {
 
 	stats := ReplayStats{}
 	st := replayState{}
-	header := make([]byte, headerSize)
+	header := make([]byte, recordHeaderSize)
 	for st.offset < fileSize {
 		rec, tailStats, stopped, err := readPhysicalRecord(f, fileSize, &st, header)
 		if stopped {

@@ -30,11 +30,11 @@ import (
 func (w *WAL) writeRecord(batchData []byte, rt RecordType) error {
 	// build the record file that will be written to the disk (WAL)
 	checksum := computeChecksum(rt, batchData)
-	header := make([]byte, headerSize)
+	header := make([]byte, recordHeaderSize)
 	binary.LittleEndian.PutUint32(header[0:4], checksum)
 	binary.LittleEndian.PutUint16(header[4:6], uint16(len(batchData)))
 	header[6] = byte(rt)
-	record := make([]byte, headerSize+len(batchData))
+	record := make([]byte, recordHeaderSize+len(batchData))
 	copy(record[0:7], header)
 	copy(record[7:], batchData)
 	n, err := w.writeAll(record)
@@ -80,7 +80,7 @@ func (w *WAL) WriteLogEntry(data []byte) error {
 	remaining := blockSize - w.blockOffset
 
 	// not enough space for even a header; pad and move to next block
-	if remaining < headerSize {
+	if remaining < recordHeaderSize {
 		padding := make([]byte, remaining)
 		if _, err := w.writeAll(padding); err != nil {
 			return err
@@ -90,7 +90,7 @@ func (w *WAL) WriteLogEntry(data []byte) error {
 	}
 
 	// fits in one record
-	if headerSize+len(data) <= remaining {
+	if recordHeaderSize+len(data) <= remaining {
 		if err := w.writeRecord(data, RecordFull); err != nil {
 			return err
 		}
@@ -106,7 +106,7 @@ func (w *WAL) writeFragmented(data []byte) error {
 		remaining := blockSize - w.blockOffset
 
 		// pad and move to next block if not enough for a header
-		if remaining < headerSize {
+		if remaining < recordHeaderSize {
 			padding := make([]byte, remaining)
 			if _, err := w.writeAll(padding); err != nil {
 				return err
@@ -116,7 +116,7 @@ func (w *WAL) writeFragmented(data []byte) error {
 		}
 
 		// how much data can we fit in this block
-		chunkSize := remaining - headerSize
+		chunkSize := remaining - recordHeaderSize
 		isLast := chunkSize >= len(data)
 		if isLast {
 			chunkSize = len(data)

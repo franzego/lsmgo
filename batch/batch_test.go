@@ -83,6 +83,35 @@ func TestPutEncodesRecordAndUpdatesCount(t *testing.T) {
 	}
 }
 
+func TestDeleteEncodesTombstoneAndUpdatesCount(t *testing.T) {
+	var b Batch
+	key := []byte("k1")
+
+	if err := b.Delete(key); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+
+	if got := b.Count(); got != 1 {
+		t.Fatalf("Count()=%d, want 1", got)
+	}
+
+	repr := b.Repr()
+	offset := headerLength
+	if got := repr[offset]; got != OpTypeDelete {
+		t.Fatalf("opType=%d, want %d", got, OpTypeDelete)
+	}
+	if got := binary.LittleEndian.Uint32(repr[offset+1 : offset+5]); got != uint32(len(key)) {
+		t.Fatalf("keyLen=%d, want %d", got, len(key))
+	}
+	if got := binary.LittleEndian.Uint32(repr[offset+5 : offset+9]); got != 0 {
+		t.Fatalf("valueLen=%d, want 0", got)
+	}
+	gotKey := repr[offset+9 : offset+9+len(key)]
+	if string(gotKey) != string(key) {
+		t.Fatalf("key=%q, want %q", gotKey, key)
+	}
+}
+
 func TestGrowExceedingCapacityResizesAndPreservesData(t *testing.T) {
 	var b Batch
 	b.opts.initialSizeBytes = 16
