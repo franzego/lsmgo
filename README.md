@@ -31,5 +31,9 @@ When you perform a read operation, the database always starts from the newest da
 Note that the various nodes in the skip-list are in various locations in DRAM, but since they hold pointers to the next node in the list in the DRAM, it is fine as opposed to a disk. On a disk, random I/O is far slower.
 So at flush time, the database does a single sorted scan of the skip-list and writes all key-value pairs sequentially to the SSTable thereby turning pointer-chased memory (caused by the random I/O) into a contiguous, sorted file. 
 This is the core trade-off of the LSM design: accept pointer indirection in memory to get sequential writes on disk. To read data, the flow is - check the active memtable, check the ones that are about to be flushed, SSTables on
-the disk from newest to oldest i.e the sequence numbers. A memtable key consist of: the userkey, the sequence/version number, the kind(put, tombstone).
+the disk from newest to oldest i.e the sequence numbers. A memtable key consist of: the userkey, the sequence/version number, the kind(put, tombstone). Also, at a certain point, there will be two memtables. One active, the other inactive.
+This is what happens: As writes come in from the batches into the memtable, the threshold will be approached rapidly. Once that threshold or capacity is reached, that memtable is "retired" and writes stop going to it. It is moved aside to be 
+replaced with a new installation of a memtable. The old and used memtable is then readied to be flushed in the background to the SSTable while the new one starts accepting writes. If a read operation comes in, the active memtable is hot first to
+check if the entry is there, then the memtable to be flushed is hit next and then the SSTables are after. Quite Interesting.
+
 

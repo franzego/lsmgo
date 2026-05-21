@@ -41,6 +41,30 @@ func (b *Batch) Put(key, value []byte) error {
 	return nil
 }
 
+func (b *Batch) Delete(key []byte) error {
+	if len(key) == 0 {
+		return ErrEmptyKey
+	}
+
+	if b.data == nil || len(b.data) < headerLength {
+		b.init(headerLength)
+	}
+
+	batchOpLen := 1 + 8 + len(key) // opType(1) + keyLen(4) + valueLen(4) + key
+	offset := len(b.data)
+	b.grow(offset + batchOpLen)
+
+	b.data[offset] = OpTypeDelete
+	binary.LittleEndian.PutUint32(b.data[offset+1:offset+5], uint32(len(key)))
+	binary.LittleEndian.PutUint32(b.data[offset+5:offset+9], 0)
+	copy(b.data[offset+9:], key)
+
+	c := b.Count()
+	c++
+	b.SetCount(c)
+	return nil
+}
+
 // Count provides a single source of truth for getting the number of items[key value pairs]/ operations that
 // have been done in the batch.
 func (b *Batch) Count() uint32 {

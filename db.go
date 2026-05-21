@@ -14,10 +14,30 @@ import (
 // DB serializes the write path so sequence assignment, WAL durability,
 // and memtable visibility share one commit order seen by all readers.
 type DB struct {
-	mu     sync.Mutex
-	seqNum atomic.Uint64
-	wal    *wal.WAL
-	mem    *memtable.MemTable
+	mu         sync.RWMutex
+	seqNum     atomic.Uint64
+	wal        *wal.WAL
+	mem        *memtable.MemTable
+	immutables []*memtable.MemTable
+	opts       options
+}
+
+type options struct {
+	memTableThresholdBytes int
+}
+
+type Option func(*options)
+
+func WithMemTableThresholdBytes(n int) Option {
+	return func(o *options) {
+		o.memTableThresholdBytes = n
+	}
+}
+
+func (o *options) ensureDefaults() {
+	if o.memTableThresholdBytes <= 0 {
+		o.memTableThresholdBytes = memtable.DefaultThresholdBytes
+	}
 }
 
 var (
@@ -27,17 +47,23 @@ var (
 	ErrCorruptBatch     = errors.New("lsm: corrupt batch")
 )
 
-func Open(w *wal.WAL) *DB {
+func Open(w *wal.WAL, opts ...Option) *DB {
+	var cfg options
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	cfg.ensureDefaults()
 	return &DB{
-		wal: w,
-		mem: memtable.NewMemtable(),
+		wal:  w,
+		mem:  memtable.NewMemtable(),
+		opts: cfg,
 	}
 }
 
 // OpenWithRecovery builds a DB and immediately replays the WAL.
 // The apply callback is invoked for each recovered log entry in replay order.
-func OpenWithRecovery(w *wal.WAL, apply func(*wal.LogEntry) error) (*DB, wal.ReplayStats, error) {
-	db := Open(w)
+func OpenWithRecovery(w *wal.WAL, apply func(*wal.LogEntry) error, opts ...Option) (*DB, wal.ReplayStats, error) {
+	db := Open(w, opts...)
 	stats, err := db.Recover(apply)
 	if err != nil {
 		return nil, stats, err
@@ -85,8 +111,51 @@ func (d *DB) Write(b *batch.Batch) error {
 		}
 	}
 
+	d.rotateMemtableIfNeeded()
 	b.Applied.Store(true)
 	return nil
+}
+
+func (d *DB) Get(key []byte) ([]byte, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if value, found, deleted := valueFromMemtable(d.mem, key); found {
+		if deleted {
+			return nil, false
+		}
+		return value, true
+	}
+	for i := len(d.immutables) - 1; i >= 0; i-- {
+		value, found, deleted := valueFromMemtable(d.immutables[i], key)
+		if !found {
+			continue
+		}
+		if deleted {
+			return nil, false
+		}
+		return value, true
+	}
+	return nil, false
+}
+
+func valueFromMemtable(m *memtable.MemTable, key []byte) ([]byte, bool, bool) {
+	ent, ok := m.GetLatest(key)
+	if !ok {
+		return nil, false, false
+	}
+	if ent.Key.Kind == memtable.KindTombstone {
+		return nil, true, true
+	}
+	return append([]byte(nil), ent.Value...), true, false
+}
+
+func (d *DB) rotateMemtableIfNeeded() {
+	if d.mem.Len() == 0 || d.mem.ApproxBytes() < d.opts.memTableThresholdBytes {
+		return
+	}
+	d.immutables = append(d.immutables, d.mem)
+	d.mem = memtable.NewMemtable()
 }
 
 // Recover replays WAL entries and restores DB sequence state.
