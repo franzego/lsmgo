@@ -41,6 +41,25 @@ func NewMemtable() *MemTable {
 	}
 }
 
+func (m *MemTable) Entries() []Entry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var entries []Entry
+	for element := m.list.Front(); element != nil; element = element.Next() {
+		e := element.Value.(Entry)
+		entries = append(entries, Entry{
+			Key: InternalKey{
+				UserKey: append([]byte(nil), e.Key.UserKey...),
+				SeqNum:  e.Key.SeqNum,
+				Kind:    e.Key.Kind,
+			},
+			Value: append([]byte(nil), e.Value...),
+		})
+	}
+	return entries
+}
+
 func (m *MemTable) ApplyPut(key, value []byte, seq uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

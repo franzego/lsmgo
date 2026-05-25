@@ -48,3 +48,43 @@ func TestApproxBytesAndReset(t *testing.T) {
 		t.Fatalf("expected reset approximate bytes=0, got %d", got)
 	}
 }
+
+func TestEntriesReturnsSortedCopies(t *testing.T) {
+	m := NewMemtable()
+	m.ApplyPut([]byte("b"), []byte("two"), 2)
+	m.ApplyPut([]byte("a"), []byte("three"), 3)
+	m.ApplyPut([]byte("a"), []byte("one"), 1)
+
+	entries := m.Entries()
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	want := []struct {
+		key string
+		seq uint64
+		val string
+	}{
+		{"a", 3, "three"},
+		{"a", 1, "one"},
+		{"b", 2, "two"},
+	}
+	for i := range want {
+		if string(entries[i].Key.UserKey) != want[i].key || entries[i].Key.SeqNum != want[i].seq || string(entries[i].Value) != want[i].val {
+			t.Fatalf("entry %d = (%q,%d,%q), want (%q,%d,%q)",
+				i,
+				entries[i].Key.UserKey,
+				entries[i].Key.SeqNum,
+				entries[i].Value,
+				want[i].key,
+				want[i].seq,
+				want[i].val)
+		}
+	}
+
+	entries[0].Key.UserKey[0] = 'z'
+	entries[0].Value[0] = 'Z'
+	again := m.Entries()
+	if string(again[0].Key.UserKey) != "a" || string(again[0].Value) != "three" {
+		t.Fatalf("entries snapshot mutated memtable storage: got %q=%q", again[0].Key.UserKey, again[0].Value)
+	}
+}

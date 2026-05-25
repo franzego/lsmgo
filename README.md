@@ -31,13 +31,21 @@ When you perform a read operation, the database always starts from the newest da
 Note that the various nodes in the skip-list are in various locations in DRAM, but since they hold pointers to the next node in the list in the DRAM, it is fine as opposed to a disk. On a disk, random I/O is far slower.
 So at flush time, the database does a single sorted scan of the skip-list and writes all key-value pairs sequentially to the SSTable thereby turning pointer-chased memory (caused by the random I/O) into a contiguous, sorted file. 
 This is the core trade-off of the LSM design: accept pointer indirection in memory to get sequential writes on disk. To read data, the flow is - check the active memtable, check the ones that are about to be flushed, SSTables on
-the disk from newest to oldest i.e the sequence numbers. A memtable key consist of: the userkey, the sequence/version number, the kind(put, tombstone). Also, at a certain point, there will be two memtables. One active, the other inactive.
+the disk from newest to oldest i.e. the sequence numbers. A memtable key consist of: the userkey, the sequence/version number, the kind(put, tombstone). Also, at a certain point, there will be two memtables. One active, the other inactive.
 This is what happens: As writes come in from the batches into the memtable, the threshold will be approached rapidly. Once that threshold or capacity is reached, that memtable is "retired" and writes stop going to it. It is moved aside to be 
 replaced with a new installation of a memtable. The old and used memtable is then readied to be flushed in the background to the SSTable while the new one starts accepting writes. If a read operation comes in, the active memtable is hot first to
 check if the entry is there, then the memtable to be flushed is hit next and then the SSTables are after. Quite Interesting.
+4. **SSTable:** The SSTable is the final resting place of data being written to the DB. Unlike the memtable that resides in the memory, the sstable is a structure that stays on the disk. It ensures durablilty - which as we have discovered the
+memtable lacks. The memtable on reaching and exceeding the threshold limit, is evicted from being active and put into a queue of memtables to be flushed. This flushed memtable is to be written sequentially to the SSTable. THe code highlights the 
+work done to make that possible. We start by using a fixed byte signature called a *magic number*. A magic number is a standard practice - I got to realize in standard LSM Db implementations(RocksDB, LevelDB). The magic number (in this case was an array of characters),
+is required to help prevent corruption. When data is written to a KV store or DB like this, it is simply bytes - 0s and 1s. We do not know when to start and when to stop reading, we do not know if what we are reading is even the correct thing. Imagine a user renames his 
+pdf file to 000001.srt, just like we represent our own SSTable file. This could lead to corruption or unpredictable behaviour. Magic numbers prevent this. If during reading the file, the magic number is not present to be read in the first four bytes or is different, then 
+it is safe to assume that the file is dubious or corrupt. Avoided levels and blocks in this implementation as the complexity was way too much for this project. Future improvements will definitely bring it into play. This segues nicely into **Bloom Filters**. Blooms are space efficient, 
+probabilistic data structures that check if an element is a member of a set. It should be noted that is not always right. It gives false positives but never false negatives. If a bloom filter says something is not there, you can be rest assured it isn't. If it says it is,
+then it may be wrong or right. A small price to pay to save memory and increase speed.
 
 
-## Resources That Helped
+### Resources That Helped
 - https://www.freecodecamp.org/news/build-an-lsm-tree-storage-engine-from-scratch-handbook/ Must read introduction to a memtable in golang.
 - https://skyzh.github.io/mini-lsm/week1-01-memtable.html A very helpful guide; written in Rust.
 - https://dave.cheney.net/2014/10/17/functional-options-for-friendly-apis A thorough guide on the functional options pattern in go.

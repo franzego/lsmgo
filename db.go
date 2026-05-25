@@ -3,11 +3,14 @@ package lsm
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
 	"github.com/franzego/lsm-golang/batch"
 	"github.com/franzego/lsm-golang/memtable"
+	"github.com/franzego/lsm-golang/sstable"
 	"github.com/franzego/lsm-golang/wal"
 )
 
@@ -20,10 +23,14 @@ type DB struct {
 	mem        *memtable.MemTable
 	immutables []*memtable.MemTable
 	opts       options
+
+	nextSSTableNum uint64
+	nextFlushIdx   int
 }
 
 type options struct {
 	memTableThresholdBytes int
+	sstableDir             string
 }
 
 type Option func(*options)
@@ -34,9 +41,18 @@ func WithMemTableThresholdBytes(n int) Option {
 	}
 }
 
+func WithSSTableDir(dir string) Option {
+	return func(o *options) {
+		o.sstableDir = dir
+	}
+}
+
 func (o *options) ensureDefaults() {
 	if o.memTableThresholdBytes <= 0 {
 		o.memTableThresholdBytes = memtable.DefaultThresholdBytes
+	}
+	if o.sstableDir == "" {
+		o.sstableDir = "sstable"
 	}
 }
 
@@ -53,11 +69,13 @@ func Open(w *wal.WAL, opts ...Option) *DB {
 		opt(&cfg)
 	}
 	cfg.ensureDefaults()
-	return &DB{
-		wal:  w,
-		mem:  memtable.NewMemtable(),
-		opts: cfg,
+	db := &DB{
+		wal:            w,
+		mem:            memtable.NewMemtable(),
+		opts:           cfg,
+		nextSSTableNum: 1,
 	}
+	return db
 }
 
 // OpenWithRecovery builds a DB and immediately replays the WAL.
@@ -150,12 +168,34 @@ func valueFromMemtable(m *memtable.MemTable, key []byte) ([]byte, bool, bool) {
 	return append([]byte(nil), ent.Value...), true, false
 }
 
-func (d *DB) rotateMemtableIfNeeded() {
+func (d *DB) rotateMemtableIfNeeded() bool {
 	if d.mem.Len() == 0 || d.mem.ApproxBytes() < d.opts.memTableThresholdBytes {
-		return
+		return false
 	}
 	d.immutables = append(d.immutables, d.mem)
 	d.mem = memtable.NewMemtable()
+	return true
+}
+
+func (d *DB) FlushOneImmutable() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.nextFlushIdx >= len(d.immutables) {
+		return nil
+	}
+	mem := d.immutables[d.nextFlushIdx]
+	path := filepath.Join(d.opts.sstableDir, fmt.Sprintf("%06d.sst", d.nextSSTableNum))
+	if err := sstable.Write(path, mem.Entries()); err != nil {
+		return err
+	}
+	d.nextFlushIdx++
+	d.nextSSTableNum++
+	return nil
+}
+
+func (d *DB) Close() error {
+	return nil
 }
 
 // Recover replays WAL entries and restores DB sequence state.
