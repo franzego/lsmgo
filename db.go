@@ -22,10 +22,10 @@ type DB struct {
 	wal        *wal.WAL
 	mem        *memtable.MemTable
 	immutables []*memtable.MemTable
+	sstables   []string
 	opts       options
 
 	nextSSTableNum uint64
-	nextFlushIdx   int
 }
 
 type options struct {
@@ -154,6 +154,16 @@ func (d *DB) Get(key []byte) ([]byte, bool) {
 		}
 		return value, true
 	}
+	for i := len(d.sstables) - 1; i >= 0; i-- {
+		value, found, deleted, err := sstable.Get(d.sstables[i], key)
+		if err != nil || !found {
+			continue
+		}
+		if deleted {
+			return nil, false
+		}
+		return value, true
+	}
 	return nil, false
 }
 
@@ -181,15 +191,16 @@ func (d *DB) FlushOneImmutable() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.nextFlushIdx >= len(d.immutables) {
+	if len(d.immutables) == 0 {
 		return nil
 	}
-	mem := d.immutables[d.nextFlushIdx]
+	mem := d.immutables[0]
 	path := filepath.Join(d.opts.sstableDir, fmt.Sprintf("%06d.sst", d.nextSSTableNum))
 	if err := sstable.Write(path, mem.Entries()); err != nil {
 		return err
 	}
-	d.nextFlushIdx++
+	d.immutables = d.immutables[1:]
+	d.sstables = append(d.sstables, path)
 	d.nextSSTableNum++
 	return nil
 }

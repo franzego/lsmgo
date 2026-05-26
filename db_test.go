@@ -381,7 +381,7 @@ func TestDBRotationKeepsCrossingBatchInOldMemtable(t *testing.T) {
 	}
 }
 
-func TestDBFlushOneImmutableWritesSSTableAndKeepsReadsVisible(t *testing.T) {
+func TestDBFlushOneImmutableWritesSSTableAndDropsImmutable(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
 	if err != nil {
@@ -405,11 +405,14 @@ func TestDBFlushOneImmutableWritesSSTableAndKeepsReadsVisible(t *testing.T) {
 	if err := db.FlushOneImmutable(); err != nil {
 		t.Fatalf("flush immutable: %v", err)
 	}
-	if got := len(db.immutables); got != 1 {
-		t.Fatalf("expected flushed immutable to remain queryable in memory, got %d", got)
+	if got := len(db.immutables); got != 0 {
+		t.Fatalf("expected flushed immutable to be dropped from memory, got %d", got)
+	}
+	if got := len(db.sstables); got != 1 {
+		t.Fatalf("expected one tracked sstable, got %d", got)
 	}
 	if got, ok := db.Get([]byte("b")); !ok || string(got) != "value" {
-		t.Fatalf("Get(b)=(%q,%v), want value,true", got, ok)
+		t.Fatalf("Get(b) from sstable=(%q,%v), want value,true", got, ok)
 	}
 
 	records := readSSTableRecords(t, filepath.Join(sstDir, "000001.sst"))
@@ -454,6 +457,124 @@ func TestDBFlushFailureKeepsImmutableRetryable(t *testing.T) {
 	}
 }
 
+func TestDBGetSearchesSSTablesNewestFirst(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
+	var first batch.Batch
+	if err := first.Put([]byte("k"), []byte("old")); err != nil {
+		t.Fatalf("put first: %v", err)
+	}
+	if err := db.Write(&first); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	if err := db.FlushOneImmutable(); err != nil {
+		t.Fatalf("flush first: %v", err)
+	}
+
+	var second batch.Batch
+	if err := second.Put([]byte("k"), []byte("new")); err != nil {
+		t.Fatalf("put second: %v", err)
+	}
+	if err := db.Write(&second); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	if err := db.FlushOneImmutable(); err != nil {
+		t.Fatalf("flush second: %v", err)
+	}
+
+	got, ok := db.Get([]byte("k"))
+	if !ok || string(got) != "new" {
+		t.Fatalf("Get(k)=(%q,%v), want new,true", got, ok)
+	}
+}
+
+func TestDBGetSSTableTombstoneHidesOlderSSTableValue(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
+	var put batch.Batch
+	if err := put.Put([]byte("k"), []byte("value")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := db.Write(&put); err != nil {
+		t.Fatalf("write put: %v", err)
+	}
+	if err := db.FlushOneImmutable(); err != nil {
+		t.Fatalf("flush put: %v", err)
+	}
+
+	var del batch.Batch
+	if err := del.Delete([]byte("k")); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := db.Write(&del); err != nil {
+		t.Fatalf("write delete: %v", err)
+	}
+	if err := db.FlushOneImmutable(); err != nil {
+		t.Fatalf("flush delete: %v", err)
+	}
+
+	if got, ok := db.Get([]byte("k")); ok {
+		t.Fatalf("deleted key returned %q", got)
+	}
+}
+
+func TestDBGetActiveAndImmutableShadowSSTables(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
+	var old batch.Batch
+	if err := old.Put([]byte("k"), []byte("sstable")); err != nil {
+		t.Fatalf("put old: %v", err)
+	}
+	if err := db.Write(&old); err != nil {
+		t.Fatalf("write old: %v", err)
+	}
+	if err := db.FlushOneImmutable(); err != nil {
+		t.Fatalf("flush old: %v", err)
+	}
+
+	db.opts.memTableThresholdBytes = memtable.DefaultThresholdBytes
+	var active batch.Batch
+	if err := active.Put([]byte("k"), []byte("active")); err != nil {
+		t.Fatalf("put active: %v", err)
+	}
+	if err := db.Write(&active); err != nil {
+		t.Fatalf("write active: %v", err)
+	}
+	if got, ok := db.Get([]byte("k")); !ok || string(got) != "active" {
+		t.Fatalf("active Get(k)=(%q,%v), want active,true", got, ok)
+	}
+
+	db.opts.memTableThresholdBytes = 1
+	var immutable batch.Batch
+	if err := immutable.Put([]byte("k"), []byte("immutable")); err != nil {
+		t.Fatalf("put immutable: %v", err)
+	}
+	if err := db.Write(&immutable); err != nil {
+		t.Fatalf("write immutable: %v", err)
+	}
+	if got, ok := db.Get([]byte("k")); !ok || string(got) != "immutable" {
+		t.Fatalf("immutable Get(k)=(%q,%v), want immutable,true", got, ok)
+	}
+}
+
 func makeBatchRepr(t *testing.T, key, val string) []byte {
 	t.Helper()
 	var b batch.Batch
@@ -476,7 +597,7 @@ func readSSTableRecords(t *testing.T, path string) []sstableRecord {
 	if err != nil {
 		t.Fatalf("read sstable: %v", err)
 	}
-	if len(raw) < 8 {
+	if len(raw) < 24 {
 		t.Fatalf("sstable too short: %d", len(raw))
 	}
 	if got := binary.LittleEndian.Uint32(raw[len(raw)-8 : len(raw)-4]); got != sstable.Version {
@@ -487,8 +608,9 @@ func readSSTableRecords(t *testing.T, path string) []sstableRecord {
 	}
 
 	var records []sstableRecord
-	for off := 0; off < len(raw)-8; {
-		if off+17 > len(raw)-8 {
+	recordEnd := int(binary.LittleEndian.Uint64(raw[len(raw)-24 : len(raw)-16]))
+	for off := 0; off < recordEnd; {
+		if off+17 > recordEnd {
 			t.Fatalf("record header out of bounds at %d", off)
 		}
 		kind := memtable.Kind(raw[off])
@@ -496,7 +618,7 @@ func readSSTableRecords(t *testing.T, path string) []sstableRecord {
 		keyLen := int(binary.LittleEndian.Uint32(raw[off+9 : off+13]))
 		valueLen := int(binary.LittleEndian.Uint32(raw[off+13 : off+17]))
 		off += 17
-		if off+keyLen+valueLen > len(raw) {
+		if off+keyLen+valueLen > recordEnd {
 			t.Fatalf("record body out of bounds at %d", off)
 		}
 		key := string(raw[off : off+keyLen])

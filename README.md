@@ -42,7 +42,7 @@ is required to help prevent corruption. When data is written to a KV store or DB
 pdf file to 000001.srt, just like we represent our own SSTable file. This could lead to corruption or unpredictable behaviour. Magic numbers prevent this. If during reading the file, the magic number is not present to be read in the first four bytes or is different, then 
 it is safe to assume that the file is dubious or corrupt. Avoided levels and blocks in this implementation as the complexity was way too much for this project. Future improvements will definitely bring it into play. This segues nicely into **Bloom Filters**. Blooms are space efficient, 
 probabilistic data structures that check if an element is a member of a set. It should be noted that is not always right. It gives false positives but never false negatives. If a bloom filter says something is not there, you can be rest assured it isn't. If it says it is,
-then it may be wrong or right. A small price to pay to save memory and increase speed.
+then it may be wrong or right. A small price to pay to save memory and increase speed. In this prototype, there are no blocks and indexes for the sstable. But the general idea of an sstable was implemented here.
 
 
 ### Resources That Helped
