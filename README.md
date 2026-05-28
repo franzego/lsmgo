@@ -2,13 +2,13 @@
 
 `lsmgo` is a small Log-Structured Merge Tree prototype written in Go for learning systems programming.
 
-The goal is not to build RocksDB. The goal is to understand the moving parts that make an LSM-style storage engine work:
+The goal is not to build RocksDB. It is to understand the moving parts that make an LSM-style storage engine work:
 
 - batching writes
 - writing to a WAL before memory
-- storing recent writes in a memtable
+- storing the recent writes in a memtable
 - flushing immutable memtables to SSTables
-- recovering the SSTable catalog with a manifest
+- recovering the SSTable catalog with a manifest file
 
 This is intentionally a learning project. Some production features are missing on purpose so the core ideas stay visible.
 
@@ -38,7 +38,7 @@ Not implemented:
 - Snapshots
 - Range scans
 
-This is the stopping point for the first publishable version: a small LSM with WAL, memtable, SSTable flush, and manifest recovery.
+This is the stopping point for the first version: a small LSM with WAL, memtable, SSTable flush, and manifest recovery. Hopeful to improve it as time permits.
 
 ## Write Path
 
@@ -89,8 +89,6 @@ The physical WAL format uses:
 - checksums
 
 Large logical records can be split across physical records. Replay reconstructs complete logical entries and stops safely on truncated tail records.
-
-The WAL code has been factored so the physical record machinery lives in `internal/log`, while the `wal` package owns batch-specific decoding.
 
 ## SSTables
 
@@ -164,7 +162,7 @@ In restricted environments, use a writable Go build cache:
 GOCACHE=/tmp/lsm-go-cache go test ./...
 ```
 
-## Lecture Notes: Understanding The Building Blocks
+## Helpful Notes: Understanding The Building Blocks
 
 Log-Structured Merge Trees have become ubiquitous in today's database world. The name has become almost synonymous with modern storage engines. LSM trees sit behind databases like CassandraDB, CockroachDB, RocksDB, LevelDB, PebbleDB, and others.
 
@@ -247,8 +245,6 @@ That is a small price to pay for reducing unnecessary disk scans.
 In this prototype, there are no SSTable blocks or indexes yet. But the general idea of an SSTable is implemented: sorted records, a Bloom filter, and a footer with validation metadata.
 
 ### 5. Manifest
-
-The manifest is the newest piece in this implementation, and it is easy to underestimate why it matters.
 
 At first, it feels like writing an SSTable file should be enough. If `000001.sst` exists on disk, why does the DB need anything else? The answer is that a database needs to know which files belong to it.
 
