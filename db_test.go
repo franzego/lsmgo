@@ -575,6 +575,127 @@ func TestDBGetActiveAndImmutableShadowSSTables(t *testing.T) {
 	}
 }
 
+func TestDBReopenRestoresSSTableCatalogAndGet(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	sstDir := filepath.Join(dir, "sst")
+	w, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
+	var b batch.Batch
+	if err := b.Put([]byte("persisted"), []byte("value")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := db.Write(&b); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := db.FlushOneImmutable(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	_ = db.Close()
+	_ = w.Close()
+
+	w2, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+	db2 := Open(w2, WithSSTableDir(sstDir))
+	t.Cleanup(func() { _ = db2.Close() })
+
+	if got := len(db2.sstables); got != 1 {
+		t.Fatalf("expected one recovered sstable, got %d", got)
+	}
+	got, ok := db2.Get([]byte("persisted"))
+	if !ok || string(got) != "value" {
+		t.Fatalf("Get after reopen=(%q,%v), want value,true", got, ok)
+	}
+}
+
+func TestDBReopenAllocatesNextSSTableNumber(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	sstDir := filepath.Join(dir, "sst")
+	w, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
+	var first batch.Batch
+	if err := first.Put([]byte("a"), []byte("1")); err != nil {
+		t.Fatalf("put first: %v", err)
+	}
+	if err := db.Write(&first); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	if err := db.FlushOneImmutable(); err != nil {
+		t.Fatalf("flush first: %v", err)
+	}
+	_ = db.Close()
+	_ = w.Close()
+
+	w2, err := wal.Open(walDir, 1)
+	if err != nil {
+		t.Fatalf("reopen wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w2.Close() })
+	db2 := Open(w2, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
+	t.Cleanup(func() { _ = db2.Close() })
+	if db2.nextSSTableNum != 2 {
+		t.Fatalf("expected next sstable num 2, got %d", db2.nextSSTableNum)
+	}
+
+	var second batch.Batch
+	if err := second.Put([]byte("b"), []byte("2")); err != nil {
+		t.Fatalf("put second: %v", err)
+	}
+	if err := db2.Write(&second); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	if err := db2.FlushOneImmutable(); err != nil {
+		t.Fatalf("flush second: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sstDir, "000002.sst")); err != nil {
+		t.Fatalf("expected second sstable number after reopen: %v", err)
+	}
+}
+
+func TestDBManifestAppendFailureDoesNotPublishSSTable(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	t.Cleanup(func() { _ = w.Close() })
+
+	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
+	var b batch.Batch
+	if err := b.Put([]byte("k"), []byte("v")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := db.Write(&b); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := db.manifest.Close(); err != nil {
+		t.Fatalf("close manifest: %v", err)
+	}
+
+	if err := db.FlushOneImmutable(); err == nil {
+		t.Fatalf("expected flush to fail after manifest close")
+	}
+	if got := len(db.sstables); got != 0 {
+		t.Fatalf("expected no published sstables, got %d", got)
+	}
+	if got := len(db.immutables); got != 1 {
+		t.Fatalf("expected immutable to remain retryable, got %d", got)
+	}
+	if db.nextSSTableNum != 1 {
+		t.Fatalf("expected file number to remain 1, got %d", db.nextSSTableNum)
+	}
+}
+
 func makeBatchRepr(t *testing.T, key, val string) []byte {
 	t.Helper()
 	var b batch.Batch

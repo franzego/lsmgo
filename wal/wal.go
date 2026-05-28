@@ -5,30 +5,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/franzego/lsm-golang/fs"
+	ilog "github.com/franzego/lsm-golang/internal/log"
 )
 
 type WAL struct {
-	mu          sync.Mutex
-	fs          fs.FS
-	file        fileLike
-	walNum      uint32
-	dir         fileLike
-	dirname     string
-	blockOffset int // current position within the 32KB block
-	closed      bool
+	fs      fs.FS
+	file    fileLike
+	walNum  uint32
+	dir     fileLike
+	dirname string
+	writer  *ilog.Writer
 }
 
 var ErrWALClosed = errors.New("wal: closed")
+var ErrCorruptRecord = errors.New("wal: corrupt record")
 
 type fileLike interface {
-	Sync() error
-	Close() error
-	Write(p []byte) (n int, err error)
-	ReadAt(p []byte, off int64) (n int, err error)
-	Stat() (os.FileInfo, error)
+	ilog.FileLike
 }
 
 func parseWALName(dir string, walNum uint32) string {
@@ -53,39 +48,23 @@ func OpenWithFS(dirpath string, walNum uint32, filesystem fs.FS) (*WAL, error) {
 		directory.Close()
 		return nil, err
 	}
-	info, err := file.Stat()
+	writer, err := ilog.NewWriter(file, directory)
 	if err != nil {
 		file.Close()
 		directory.Close()
 		return nil, err
 	}
-	blockOffset := int(info.Size() % blockSize)
 
 	return &WAL{
-		fs:          filesystem,
-		file:        file,
-		walNum:      walNum,
-		dir:         directory,
-		dirname:     dirpath,
-		blockOffset: blockOffset,
+		fs:      filesystem,
+		file:    file,
+		walNum:  walNum,
+		dir:     directory,
+		dirname: dirpath,
+		writer:  writer,
 	}, nil
 }
 
 func (w *WAL) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.closed {
-		return nil
-	}
-	if err := w.file.Sync(); err != nil {
-		return err
-	}
-	if err := w.file.Close(); err != nil {
-		return err
-	}
-	if err := w.dir.Close(); err != nil {
-		return err
-	}
-	w.closed = true
-	return nil
+	return w.writer.Close()
 }
