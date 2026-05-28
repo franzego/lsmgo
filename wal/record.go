@@ -1,24 +1,18 @@
 package wal
 
 import (
-	"hash/crc32"
+	ilog "github.com/franzego/lsm-golang/internal/log"
 )
 
 const (
-	blockSize        = 32 * 1024 // this is for organisation in the WAL
-	recordHeaderSize = 7
+	blockSize        = ilog.BlockSize
+	recordHeaderSize = ilog.RecordHeaderSize
 )
 
-type RecordType uint8
-
-var crcTable = crc32.MakeTable(crc32.Castagnoli)
+type RecordType = ilog.RecordType
 
 func computeChecksum(rt RecordType, data []byte) uint32 {
-	crc := crc32.New(crcTable)
-	crc.Write([]byte{byte(rt)})
-	crc.Write(data)
-	return crc.Sum32()
-
+	return ilog.ComputeChecksum(rt, data)
 }
 
 // This is required for the reader to tell if the bytes it is reading in the WAL
@@ -31,8 +25,8 @@ func computeChecksum(rt RecordType, data []byte) uint32 {
 // the final fragment. It means the logentry has been completed and can now be
 // committed.
 const (
-	RecordFull   RecordType = 1
-	RecordFirst  RecordType = 2
-	RecordMiddle RecordType = 3
-	RecordLast   RecordType = 4
+	RecordFull   = ilog.RecordFull
+	RecordFirst  = ilog.RecordFirst
+	RecordMiddle = ilog.RecordMiddle
+	RecordLast   = ilog.RecordLast
 )

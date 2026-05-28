@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/franzego/lsm-golang/batch"
+	"github.com/franzego/lsm-golang/manifest"
 	"github.com/franzego/lsm-golang/memtable"
 	"github.com/franzego/lsm-golang/sstable"
 	"github.com/franzego/lsm-golang/wal"
@@ -17,13 +18,15 @@ import (
 // DB serializes the write path so sequence assignment, WAL durability,
 // and memtable visibility share one commit order seen by all readers.
 type DB struct {
-	mu         sync.RWMutex
-	seqNum     atomic.Uint64
-	wal        *wal.WAL
-	mem        *memtable.MemTable
-	immutables []*memtable.MemTable
-	sstables   []string
-	opts       options
+	mu          sync.RWMutex
+	seqNum      atomic.Uint64
+	wal         *wal.WAL
+	mem         *memtable.MemTable
+	immutables  []*memtable.MemTable
+	sstables    []string
+	manifest    *manifest.Manifest
+	manifestErr error
+	opts        options
 
 	nextSSTableNum uint64
 }
@@ -31,6 +34,7 @@ type DB struct {
 type options struct {
 	memTableThresholdBytes int
 	sstableDir             string
+	sstableDirConfigured   bool
 }
 
 type Option func(*options)
@@ -44,6 +48,7 @@ func WithMemTableThresholdBytes(n int) Option {
 func WithSSTableDir(dir string) Option {
 	return func(o *options) {
 		o.sstableDir = dir
+		o.sstableDirConfigured = true
 	}
 }
 
@@ -74,6 +79,18 @@ func Open(w *wal.WAL, opts ...Option) *DB {
 		mem:            memtable.NewMemtable(),
 		opts:           cfg,
 		nextSSTableNum: 1,
+	}
+	if cfg.sstableDirConfigured {
+		m, state, err := manifest.Open(cfg.sstableDir)
+		if err != nil {
+			db.manifestErr = err
+			return db
+		}
+		db.manifest = m
+		db.nextSSTableNum = state.NextFileNum
+		for _, table := range state.SSTables {
+			db.sstables = append(db.sstables, table.Path)
+		}
 	}
 	return db
 }
@@ -194,18 +211,57 @@ func (d *DB) FlushOneImmutable() error {
 	if len(d.immutables) == 0 {
 		return nil
 	}
+	if err := d.ensureManifestReadyLocked(); err != nil {
+		return err
+	}
 	mem := d.immutables[0]
-	path := filepath.Join(d.opts.sstableDir, fmt.Sprintf("%06d.sst", d.nextSSTableNum))
+	fileNum := d.nextSSTableNum
+	path := filepath.Join(d.opts.sstableDir, fmt.Sprintf("%06d.sst", fileNum))
 	if err := sstable.Write(path, mem.Entries()); err != nil {
 		return err
 	}
+	nextFileNum := fileNum + 1
+	if d.manifest != nil {
+		err := d.manifest.Append(manifest.Edit{
+			AddSSTables: []manifest.SSTable{{
+				FileNum: fileNum,
+				Path:    path,
+			}},
+			NextFileNum: &nextFileNum,
+		})
+		if err != nil {
+			return err
+		}
+	}
 	d.immutables = d.immutables[1:]
 	d.sstables = append(d.sstables, path)
-	d.nextSSTableNum++
+	d.nextSSTableNum = nextFileNum
+	return nil
+}
+
+func (d *DB) ensureManifestReadyLocked() error {
+	if !d.opts.sstableDirConfigured || d.manifestErr == nil {
+		return d.manifestErr
+	}
+	m, state, err := manifest.Open(d.opts.sstableDir)
+	if err != nil {
+		d.manifestErr = err
+		return err
+	}
+	d.manifest = m
+	d.manifestErr = nil
+	d.sstables = d.sstables[:0]
+	d.nextSSTableNum = state.NextFileNum
+	for _, table := range state.SSTables {
+		d.sstables = append(d.sstables, table.Path)
+	}
 	return nil
 }
 
 func (d *DB) Close() error {
+	if d.manifest != nil {
+		return d.manifest.Close()
+	}
 	return nil
 }
 
