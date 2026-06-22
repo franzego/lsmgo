@@ -210,7 +210,7 @@ In this prototype, a skip list is used as the underlying data structure.
 
 Why not a map? Maps are strong for insertion and lookup, but they are usually unordered. The real problem appears at flush time. When a memtable reaches its threshold and needs to be written to an SSTable, the DB needs sorted iteration over all keys. A hash map cannot give you that without a full sort at flush time, which is `O(n log n)`.
 
-The skip list maintains sorted order continuously as inserts happen, so flushing is just a linear scan. That is the real advantage here.
+The skip list maintains sorted order continuously as inserts happen, so flushing is just a linear scan. That is the real advantage here. Funnily enough, while running benchmarks, i realized that the skiplist library that I am working with - github.com/huandu/skiplist - accepts keys as interfaces `interface{}`. Go does its boxing leading to the key value probably escaping to the heap. The time per ops for a GetLatestKey iteration is between ~599 and 680 ns/op. Sometimes as far as 761.5 or even 800 ns/ops. While the current skiplist library is good for general purpose workand honsetly really great, it is quite evident that to mimic how real LSM engines carry out their tasks, it will not suffice. A newer, specific skiplist implementation has to be made for the "hot path" of an LSM engine.
 
 When you perform a read operation, the database starts from the newest data first: the active memtable, then immutable memtables, then SSTables from newest to oldest. If there are two entries for a key, the newest one shadows the older one.
 

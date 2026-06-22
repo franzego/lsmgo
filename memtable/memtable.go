@@ -108,7 +108,7 @@ func (m *MemTable) GetLatest(key []byte) (Entry, bool) {
 	defer m.mu.RUnlock()
 
 	probe := InternalKey{
-		UserKey: append([]byte(nil), key...),
+		UserKey: key,
 		// Probe with max sequence to land on newest version under current key ordering.
 		SeqNum: ^uint64(0),
 		Kind:   KindPut,
