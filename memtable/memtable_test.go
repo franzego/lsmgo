@@ -1,6 +1,10 @@
 package memtable
 
-import "testing"
+import (
+	"encoding/binary"
+	"fmt"
+	"testing"
+)
 
 func TestGetLatestReturnsHighestSeqForSameKey(t *testing.T) {
 	m := NewMemtable()
@@ -86,5 +90,78 @@ func TestEntriesReturnsSortedCopies(t *testing.T) {
 	again := m.Entries()
 	if string(again[0].Key.UserKey) != "a" || string(again[0].Value) != "three" {
 		t.Fatalf("entries snapshot mutated memtable storage: got %q=%q", again[0].Key.UserKey, again[0].Value)
+	}
+}
+
+func benchmarkMemtableKey(i uint64) []byte {
+	key := make([]byte, 16)
+	copy(key, "bench-key")
+	binary.BigEndian.PutUint64(key[8:], i)
+	return key
+}
+
+func benchmarkMemtableValue() []byte {
+	return []byte("bench-value-000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+}
+
+func BenchmarkMemTableApplyPutSameKeyVersions(b *testing.B) {
+	m := NewMemtable()
+	key := []byte("bench-key-000001")
+	value := benchmarkMemtableValue()
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(key) + len(value)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		m.ApplyPut(key, value, uint64(i+1))
+	}
+}
+
+func BenchmarkMemTableApplyPutUniqueKeys(b *testing.B) {
+	value := benchmarkMemtableValue()
+
+	for _, prefill := range []int{0, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("prefill_%d", prefill), func(b *testing.B) {
+			m := NewMemtable()
+			for i := 0; i < prefill; i++ {
+				m.ApplyPut(benchmarkMemtableKey(uint64(i)), value, uint64(i+1))
+			}
+
+			b.ReportAllocs()
+			b.SetBytes(int64(16 + len(value)))
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				seq := uint64(prefill + i + 1)
+				m.ApplyPut(benchmarkMemtableKey(seq), value, seq)
+			}
+		})
+	}
+}
+
+func BenchmarkMemTableGetLatest(b *testing.B) {
+	value := benchmarkMemtableValue()
+
+	for _, size := range []int{1, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("size_%d", size), func(b *testing.B) {
+			m := NewMemtable()
+			keys := make([][]byte, size)
+			for i := 0; i < size; i++ {
+				key := benchmarkMemtableKey(uint64(i))
+				keys[i] = key
+				m.ApplyPut(key, value, uint64(i+1))
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				key := keys[i%len(keys)]
+				if _, ok := m.GetLatest(key); !ok {
+					b.Fatalf("missing key %q", key)
+				}
+			}
+		})
 	}
 }
