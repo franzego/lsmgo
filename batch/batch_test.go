@@ -2,6 +2,7 @@ package batch
 
 import (
 	"encoding/binary"
+	"fmt"
 	"testing"
 )
 
@@ -133,5 +134,68 @@ func TestGrowExceedingCapacityResizesAndPreservesData(t *testing.T) {
 	}
 	if got := string(b.data[:headerLength]); got != "abcdefghijkl" {
 		t.Fatalf("data prefix changed: got %q", got)
+	}
+}
+
+func benchmarkPutInput() ([]byte, []byte) {
+	key := []byte("bench-key-000001")
+	value := []byte("bench-value-000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+	return key, value
+}
+
+func BenchmarkBatchPutFresh(b *testing.B) {
+	key, value := benchmarkPutInput()
+	bytesPerPut := int64(1 + 4 + 4 + len(key) + len(value))
+
+	b.ReportAllocs()
+	b.SetBytes(bytesPerPut)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		var batch Batch
+		if err := batch.Put(key, value); err != nil {
+			b.Fatalf("put: %v", err)
+		}
+	}
+}
+
+func BenchmarkBatchPutReuse(b *testing.B) {
+	key, value := benchmarkPutInput()
+	bytesPerPut := int64(1 + 4 + 4 + len(key) + len(value))
+	var batch Batch
+
+	b.ReportAllocs()
+	b.SetBytes(bytesPerPut)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		batch.Reset()
+		if err := batch.Put(key, value); err != nil {
+			b.Fatalf("put: %v", err)
+		}
+	}
+}
+
+func BenchmarkBatchPutMany(b *testing.B) {
+	key, value := benchmarkPutInput()
+	bytesPerPut := int64(1 + 4 + 4 + len(key) + len(value))
+
+	for _, count := range []int{1, 10, 100, 1000} {
+		b.Run(fmt.Sprintf("count_%d", count), func(b *testing.B) {
+			var batch Batch
+
+			b.ReportAllocs()
+			b.SetBytes(bytesPerPut * int64(count))
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				batch.Reset()
+				for j := 0; j < count; j++ {
+					if err := batch.Put(key, value); err != nil {
+						b.Fatalf("put %d: %v", j, err)
+					}
+				}
+			}
+		})
 	}
 }
