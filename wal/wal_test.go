@@ -361,6 +361,54 @@ func BenchmarkWALWriteLogEntry(b *testing.B) {
 	}
 }
 
+func BenchmarkWALReplay(b *testing.B) {
+	payloadSizes := []int{128, 8 * 1024}
+	entryCounts := []int{100, 1000}
+
+	for _, payloadSize := range payloadSizes {
+		for _, entryCount := range entryCounts {
+			name := fmt.Sprintf("entries_%d_payload_%dB", entryCount, payloadSize)
+			b.Run(name, func(b *testing.B) {
+				dir := b.TempDir()
+				w, err := Open(filepath.Join(dir, "wal"), 1)
+				if err != nil {
+					b.Fatalf("open wal: %v", err)
+				}
+
+				body := make([]byte, payloadSize)
+				for i := range body {
+					body[i] = byte(i % 251)
+				}
+				for i := 0; i < entryCount; i++ {
+					payload := makeReplayPayload(uint64(i+1), 1, body)
+					if err := w.WriteLogEntry(payload); err != nil {
+						b.Fatalf("write replay fixture: %v", err)
+					}
+				}
+				defer func() { _ = w.Close() }()
+
+				b.ReportAllocs()
+				b.SetBytes(int64(entryCount * (12 + payloadSize)))
+				b.ResetTimer()
+
+				for i := 0; i < b.N; i++ {
+					var replayed int
+					stats, err := w.Replay(func(e *LogEntry) error {
+						replayed++
+						return nil
+					})
+					if err != nil {
+						b.Fatalf("replay: %v", err)
+					}
+					if replayed != entryCount || stats.RecordsReplayed != entryCount {
+						b.Fatalf("replayed=%d stats=%d, want %d", replayed, stats.RecordsReplayed, entryCount)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestReplayStopsOnTruncatedTailNonFatal(t *testing.T) {
 	dir := t.TempDir()
 	walDir := filepath.Join(dir, "wal")

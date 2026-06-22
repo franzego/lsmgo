@@ -45,6 +45,102 @@ func TestDBWriteAssignsSeqAndMarksApplied(t *testing.T) {
 	}
 }
 
+func benchmarkDBWriteInput() ([]byte, []byte) {
+	key := []byte("bench-key-000001")
+	value := []byte("bench-value-000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+	return key, value
+}
+
+func BenchmarkDBWriteSinglePutFreshBatch(b *testing.B) {
+	dir := b.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		b.Fatalf("open wal: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	db := Open(w, WithMemTableThresholdBytes(1<<30))
+	key, value := benchmarkDBWriteInput()
+	bytesPerPut := int64(1 + 4 + 4 + len(key) + len(value))
+
+	b.ReportAllocs()
+	b.SetBytes(bytesPerPut)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		var batch batch.Batch
+		if err := batch.Put(key, value); err != nil {
+			b.Fatalf("put batch: %v", err)
+		}
+		if err := db.Write(&batch); err != nil {
+			b.Fatalf("db write: %v", err)
+		}
+	}
+}
+
+func BenchmarkDBWriteSinglePutReusedBatch(b *testing.B) {
+	dir := b.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+	if err != nil {
+		b.Fatalf("open wal: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	db := Open(w, WithMemTableThresholdBytes(1<<30))
+	key, value := benchmarkDBWriteInput()
+	bytesPerPut := int64(1 + 4 + 4 + len(key) + len(value))
+	var batch batch.Batch
+
+	b.ReportAllocs()
+	b.SetBytes(bytesPerPut)
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		batch.Reset()
+		if err := batch.Put(key, value); err != nil {
+			b.Fatalf("put batch: %v", err)
+		}
+		if err := db.Write(&batch); err != nil {
+			b.Fatalf("db write: %v", err)
+		}
+	}
+}
+
+func BenchmarkDBWriteBatchSizes(b *testing.B) {
+	key, value := benchmarkDBWriteInput()
+	bytesPerPut := int64(1 + 4 + 4 + len(key) + len(value))
+
+	for _, count := range []int{1, 10, 100} {
+		b.Run(fmt.Sprintf("count_%d", count), func(b *testing.B) {
+			dir := b.TempDir()
+			w, err := wal.Open(filepath.Join(dir, "wal"), 1)
+			if err != nil {
+				b.Fatalf("open wal: %v", err)
+			}
+			defer func() { _ = w.Close() }()
+
+			db := Open(w, WithMemTableThresholdBytes(1<<30))
+			var batch batch.Batch
+
+			b.ReportAllocs()
+			b.SetBytes(bytesPerPut * int64(count))
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				batch.Reset()
+				for j := 0; j < count; j++ {
+					if err := batch.Put(key, value); err != nil {
+						b.Fatalf("put %d: %v", j, err)
+					}
+				}
+				if err := db.Write(&batch); err != nil {
+					b.Fatalf("db write: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestDBWriteNilBatch(t *testing.T) {
 	db := Open(nil)
 	if err := db.Write(nil); !errors.Is(err, ErrNilBatch) {
