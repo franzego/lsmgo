@@ -31,11 +31,15 @@ func NewWriter(file, dir FileLike) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Writer{
+	w := &Writer{
 		file:        file,
 		dir:         dir,
 		blockOffset: int(info.Size() % BlockSize),
-	}, nil
+	}
+	if err := w.syncDir(); err != nil {
+		return nil, err
+	}
+	return w, nil
 }
 
 func (w *Writer) Write(data []byte) error {
@@ -57,7 +61,7 @@ func (w *Writer) Write(data []byte) error {
 		if err := w.writeRecord(data, RecordFull); err != nil {
 			return err
 		}
-		return w.sync()
+		return w.syncFile()
 	}
 	return w.writeFragmented(data)
 }
@@ -150,12 +154,13 @@ func (w *Writer) writeFragmented(data []byte) error {
 		data = data[chunkSize:]
 		first = false
 	}
-	return w.sync()
+	return w.syncFile()
 }
 
-func (w *Writer) sync() error {
-	if err := w.file.Sync(); err != nil {
-		return err
-	}
+func (w *Writer) syncFile() error {
+	return w.file.Sync()
+}
+
+func (w *Writer) syncDir() error {
 	return w.dir.Sync()
 }
