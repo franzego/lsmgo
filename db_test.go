@@ -25,7 +25,7 @@ func TestDBWriteAssignsSeqAndMarksApplied(t *testing.T) {
 		_ = w.Close()
 	})
 
-	db := Open(w)
+	db := openWithWAL(w)
 	var b batch.Batch
 	if err := b.Put([]byte("k"), []byte("v")); err != nil {
 		t.Fatalf("put batch: %v", err)
@@ -45,6 +45,214 @@ func TestDBWriteAssignsSeqAndMarksApplied(t *testing.T) {
 	}
 }
 
+func TestOpenCreatesDefaultLayout(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, path := range []string{
+		filepath.Join(dir, "wal", "000001.log"),
+		filepath.Join(dir, "sstable", "MANIFEST"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to exist: %v", path, err)
+		}
+	}
+}
+
+func TestOpenReplaysWALIntoMemtableAndRestoresSequence(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	var btch batch.Batch
+	if err := btch.Put([]byte("k1"), []byte("v1")); err != nil {
+		t.Fatalf("put btch: %v", err)
+	}
+	if err := btch.Put([]byte("k2"), []byte("v2")); err != nil {
+		t.Fatalf("put second: %v", err)
+	}
+	if err := db.Write(&btch); err != nil {
+		t.Fatalf("write btch: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	if got, ok := reopened.Get([]byte("k1")); !ok || string(got) != "v1" {
+		t.Fatalf("Get(k1)=(%q,%v), want v1,true", got, ok)
+	}
+	if got, ok := reopened.Get([]byte("k2")); !ok || string(got) != "v2" {
+		t.Fatalf("Get(k2)=(%q,%v), want v2,true", got, ok)
+	}
+
+	var next batch.Batch
+	if err := next.Put([]byte("k3"), []byte("v3")); err != nil {
+		t.Fatalf("put next: %v", err)
+	}
+	if err := reopened.Write(&next); err != nil {
+		t.Fatalf("write next: %v", err)
+	}
+	if got := next.SeqNum(); got != 3 {
+		t.Fatalf("expected next seq=3 after recovery, got %d", got)
+	}
+}
+
+func TestOpenRestoresManifestSSTableCatalog(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir, WithMemTableThresholdBytes(1))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	var b batch.Batch
+	if err := b.Put([]byte("persisted"), []byte("value")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := db.Write(&b); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := db.FlushOneImmutable(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	if got := len(reopened.sstables); got != 1 {
+		t.Fatalf("expected one recovered sstable, got %d", got)
+	}
+	if got, ok := reopened.Get([]byte("persisted")); !ok || string(got) != "value" {
+		t.Fatalf("Get after reopen=(%q,%v), want value,true", got, ok)
+	}
+}
+
+func TestDBPutGetConvenience(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := db.Put([]byte("k"), []byte("value")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, ok := db.Get([]byte("k"))
+	if !ok || string(got) != "value" {
+		t.Fatalf("Get(k)=(%q,%v), want value,true", got, ok)
+	}
+
+	got[0] = 'V'
+	gotAgain, ok := db.Get([]byte("k"))
+	if !ok || string(gotAgain) != "value" {
+		t.Fatalf("stored value changed through returned slice: got %q,%v", gotAgain, ok)
+	}
+}
+
+func TestDBPutConvenienceOverwritesOlderValue(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := db.Put([]byte("k"), []byte("old")); err != nil {
+		t.Fatalf("put old: %v", err)
+	}
+	if err := db.Put([]byte("k"), []byte("new")); err != nil {
+		t.Fatalf("put new: %v", err)
+	}
+	got, ok := db.Get([]byte("k"))
+	if !ok || string(got) != "new" {
+		t.Fatalf("Get(k)=(%q,%v), want new,true", got, ok)
+	}
+}
+
+func TestDBDeleteConvenienceHidesExistingKey(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := db.Put([]byte("k"), []byte("value")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := db.Delete([]byte("k")); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got, ok := db.Get([]byte("k")); ok {
+		t.Fatalf("deleted key returned %q", got)
+	}
+}
+
+func TestDBPutDeleteConvenienceRejectEmptyKey(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := db.Put(nil, []byte("value")); !errors.Is(err, batch.ErrEmptyKey) {
+		t.Fatalf("Put(nil)=%v, want batch.ErrEmptyKey", err)
+	}
+	if err := db.Delete(nil); !errors.Is(err, batch.ErrEmptyKey) {
+		t.Fatalf("Delete(nil)=%v, want batch.ErrEmptyKey", err)
+	}
+}
+
+func TestDBPutDeleteConvenienceRecoverAfterReopen(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.Put([]byte("keep"), []byte("value")); err != nil {
+		t.Fatalf("put keep: %v", err)
+	}
+	if err := db.Put([]byte("gone"), []byte("value")); err != nil {
+		t.Fatalf("put gone: %v", err)
+	}
+	if err := db.Delete([]byte("gone")); err != nil {
+		t.Fatalf("delete gone: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	if got, ok := reopened.Get([]byte("keep")); !ok || string(got) != "value" {
+		t.Fatalf("Get(keep)=(%q,%v), want value,true", got, ok)
+	}
+	if got, ok := reopened.Get([]byte("gone")); ok {
+		t.Fatalf("deleted key returned %q", got)
+	}
+}
+
 func benchmarkDBWriteInput() ([]byte, []byte) {
 	key := []byte("bench-key-000001")
 	value := []byte("bench-value-000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
@@ -59,7 +267,7 @@ func BenchmarkDBWriteSinglePutFreshBatch(b *testing.B) {
 	}
 	defer func() { _ = w.Close() }()
 
-	db := Open(w, WithMemTableThresholdBytes(1<<30))
+	db := openWithWAL(w, WithMemTableThresholdBytes(1<<30))
 	key, value := benchmarkDBWriteInput()
 	bytesPerPut := int64(1 + 4 + 4 + len(key) + len(value))
 
@@ -86,7 +294,7 @@ func BenchmarkDBWriteSinglePutReusedBatch(b *testing.B) {
 	}
 	defer func() { _ = w.Close() }()
 
-	db := Open(w, WithMemTableThresholdBytes(1<<30))
+	db := openWithWAL(w, WithMemTableThresholdBytes(1<<30))
 	key, value := benchmarkDBWriteInput()
 	bytesPerPut := int64(1 + 4 + 4 + len(key) + len(value))
 	var batch batch.Batch
@@ -119,7 +327,7 @@ func BenchmarkDBWriteBatchSizes(b *testing.B) {
 			}
 			defer func() { _ = w.Close() }()
 
-			db := Open(w, WithMemTableThresholdBytes(1<<30))
+			db := openWithWAL(w, WithMemTableThresholdBytes(1<<30))
 			var batch batch.Batch
 
 			b.ReportAllocs()
@@ -142,7 +350,7 @@ func BenchmarkDBWriteBatchSizes(b *testing.B) {
 }
 
 func TestDBWriteNilBatch(t *testing.T) {
-	db := Open(nil)
+	db := openWithWAL(nil)
 	if err := db.Write(nil); !errors.Is(err, ErrNilBatch) {
 		t.Fatalf("expected ErrNilBatch, got %v", err)
 	}
@@ -156,23 +364,23 @@ func TestDBWriteMultiOpBatchUsesRangeStartSeq(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w)
+	db := openWithWAL(w)
 
-	var first batch.Batch
-	if err := first.Put([]byte("a"), []byte("1")); err != nil {
-		t.Fatalf("put first: %v", err)
+	var btch batch.Batch
+	if err := btch.Put([]byte("a"), []byte("1")); err != nil {
+		t.Fatalf("put btch: %v", err)
 	}
-	if err := first.Put([]byte("b"), []byte("2")); err != nil {
-		t.Fatalf("put first: %v", err)
+	if err := btch.Put([]byte("b"), []byte("2")); err != nil {
+		t.Fatalf("put btch: %v", err)
 	}
-	if err := first.Put([]byte("c"), []byte("3")); err != nil {
-		t.Fatalf("put first: %v", err)
+	if err := btch.Put([]byte("c"), []byte("3")); err != nil {
+		t.Fatalf("put btch: %v", err)
 	}
-	if err := db.Write(&first); err != nil {
-		t.Fatalf("write first: %v", err)
+	if err := db.Write(&btch); err != nil {
+		t.Fatalf("write btch: %v", err)
 	}
-	if got := first.SeqNum(); got != 1 {
-		t.Fatalf("expected first batch start seq=1, got %d", got)
+	if got := btch.SeqNum(); got != 1 {
+		t.Fatalf("expected btch batch start seq=1, got %d", got)
 	}
 
 	var second batch.Batch
@@ -201,7 +409,7 @@ func TestDBWriteRejectsCorruptBatchPayload(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w)
+	db := openWithWAL(w)
 
 	var valid batch.Batch
 	if err := valid.Put([]byte("k"), []byte("v")); err != nil {
@@ -225,7 +433,7 @@ func TestDBWriteRejectsInvalidOpTypeBeforeWALPersist(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w)
+	db := openWithWAL(w)
 
 	var valid batch.Batch
 	if err := valid.Put([]byte("k"), []byte("v")); err != nil {
@@ -260,7 +468,7 @@ func TestDBWriteWALFailureDoesNotApplyMemtableOrMarkApplied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open wal: %v", err)
 	}
-	db := Open(w)
+	db := openWithWAL(w)
 	if err := w.Close(); err != nil {
 		t.Fatalf("close wal: %v", err)
 	}
@@ -281,67 +489,6 @@ func TestDBWriteWALFailureDoesNotApplyMemtableOrMarkApplied(t *testing.T) {
 	}
 }
 
-func TestDBGetReadsActiveMemtableAndCopiesValue(t *testing.T) {
-	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
-	if err != nil {
-		t.Fatalf("open wal: %v", err)
-	}
-	t.Cleanup(func() { _ = w.Close() })
-
-	db := Open(w)
-	var b batch.Batch
-	if err := b.Put([]byte("k"), []byte("value")); err != nil {
-		t.Fatalf("put batch: %v", err)
-	}
-	if err := db.Write(&b); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	got, ok := db.Get([]byte("k"))
-	if !ok || string(got) != "value" {
-		t.Fatalf("Get(k)=(%q,%v), want value,true", got, ok)
-	}
-	got[0] = 'V'
-	gotAgain, ok := db.Get([]byte("k"))
-	if !ok || string(gotAgain) != "value" {
-		t.Fatalf("stored value changed through returned slice: got %q,%v", gotAgain, ok)
-	}
-}
-
-func TestDBGetReturnsNewestValueAndMissingKey(t *testing.T) {
-	dir := t.TempDir()
-	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
-	if err != nil {
-		t.Fatalf("open wal: %v", err)
-	}
-	t.Cleanup(func() { _ = w.Close() })
-
-	db := Open(w)
-	var first batch.Batch
-	if err := first.Put([]byte("k"), []byte("old")); err != nil {
-		t.Fatalf("put first: %v", err)
-	}
-	if err := db.Write(&first); err != nil {
-		t.Fatalf("write first: %v", err)
-	}
-	var second batch.Batch
-	if err := second.Put([]byte("k"), []byte("new")); err != nil {
-		t.Fatalf("put second: %v", err)
-	}
-	if err := db.Write(&second); err != nil {
-		t.Fatalf("write second: %v", err)
-	}
-
-	got, ok := db.Get([]byte("k"))
-	if !ok || string(got) != "new" {
-		t.Fatalf("Get(k)=(%q,%v), want new,true", got, ok)
-	}
-	if got, ok := db.Get([]byte("missing")); ok {
-		t.Fatalf("Get(missing)=(%q,true), want false", got)
-	}
-}
-
 func TestDBGetTombstoneHidesOlderValue(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
@@ -350,7 +497,7 @@ func TestDBGetTombstoneHidesOlderValue(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w, WithMemTableThresholdBytes(45))
+	db := openWithWAL(w, WithMemTableThresholdBytes(45))
 	var put batch.Batch
 	if err := put.Put([]byte("rotated"), []byte("large-value-for-rotation")); err != nil {
 		t.Fatalf("put batch: %v", err)
@@ -382,13 +529,13 @@ func TestDBMemtableRotationKeepsImmutablesQueryable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w, WithMemTableThresholdBytes(45))
-	var first batch.Batch
-	if err := first.Put([]byte("rotated"), []byte("large-value-for-rotation")); err != nil {
-		t.Fatalf("put first: %v", err)
+	db := openWithWAL(w, WithMemTableThresholdBytes(45))
+	var btch batch.Batch
+	if err := btch.Put([]byte("rotated"), []byte("large-value-for-rotation")); err != nil {
+		t.Fatalf("put btch: %v", err)
 	}
-	if err := db.Write(&first); err != nil {
-		t.Fatalf("write first: %v", err)
+	if err := db.Write(&btch); err != nil {
+		t.Fatalf("write btch: %v", err)
 	}
 	if got := len(db.immutables); got != 1 {
 		t.Fatalf("expected one immutable after rotation, got %d", got)
@@ -423,13 +570,13 @@ func TestDBGetPrefersNewestImmutable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w, WithMemTableThresholdBytes(1))
-	var first batch.Batch
-	if err := first.Put([]byte("k"), []byte("old")); err != nil {
-		t.Fatalf("put first: %v", err)
+	db := openWithWAL(w, WithMemTableThresholdBytes(1))
+	var btch batch.Batch
+	if err := btch.Put([]byte("k"), []byte("old")); err != nil {
+		t.Fatalf("put btch: %v", err)
 	}
-	if err := db.Write(&first); err != nil {
-		t.Fatalf("write first: %v", err)
+	if err := db.Write(&btch); err != nil {
+		t.Fatalf("write btch: %v", err)
 	}
 	var second batch.Batch
 	if err := second.Put([]byte("k"), []byte("new")); err != nil {
@@ -454,7 +601,7 @@ func TestDBRotationKeepsCrossingBatchInOldMemtable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w, WithMemTableThresholdBytes(1))
+	db := openWithWAL(w, WithMemTableThresholdBytes(1))
 	var b batch.Batch
 	if err := b.Put([]byte("a"), []byte("1")); err != nil {
 		t.Fatalf("put a: %v", err)
@@ -486,7 +633,7 @@ func TestDBFlushOneImmutableWritesSSTableAndDropsImmutable(t *testing.T) {
 	t.Cleanup(func() { _ = w.Close() })
 
 	sstDir := filepath.Join(dir, "sst")
-	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
+	db := openWithWAL(w, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
 	var b batch.Batch
 	if err := b.Put([]byte("b"), []byte("value")); err != nil {
 		t.Fatalf("put b: %v", err)
@@ -531,7 +678,7 @@ func TestDBFlushFailureKeepsImmutableRetryable(t *testing.T) {
 	if err := os.WriteFile(notDir, []byte("file"), 0o644); err != nil {
 		t.Fatalf("create file: %v", err)
 	}
-	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(notDir))
+	db := openWithWAL(w, WithMemTableThresholdBytes(1), WithSSTableDir(notDir))
 	var b batch.Batch
 	if err := b.Put([]byte("k"), []byte("v")); err != nil {
 		t.Fatalf("put: %v", err)
@@ -553,7 +700,7 @@ func TestDBFlushFailureKeepsImmutableRetryable(t *testing.T) {
 	}
 }
 
-func TestDBGetSearchesSSTablesNewestFirst(t *testing.T) {
+func TestDBGetSearchesSSTablesNewestbtch(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"), 1)
 	if err != nil {
@@ -561,16 +708,16 @@ func TestDBGetSearchesSSTablesNewestFirst(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
-	var first batch.Batch
-	if err := first.Put([]byte("k"), []byte("old")); err != nil {
-		t.Fatalf("put first: %v", err)
+	db := openWithWAL(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
+	var btch batch.Batch
+	if err := btch.Put([]byte("k"), []byte("old")); err != nil {
+		t.Fatalf("put btch: %v", err)
 	}
-	if err := db.Write(&first); err != nil {
-		t.Fatalf("write first: %v", err)
+	if err := db.Write(&btch); err != nil {
+		t.Fatalf("write btch: %v", err)
 	}
 	if err := db.FlushOneImmutable(); err != nil {
-		t.Fatalf("flush first: %v", err)
+		t.Fatalf("flush btch: %v", err)
 	}
 
 	var second batch.Batch
@@ -598,7 +745,7 @@ func TestDBGetSSTableTombstoneHidesOlderSSTableValue(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
+	db := openWithWAL(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
 	var put batch.Batch
 	if err := put.Put([]byte("k"), []byte("value")); err != nil {
 		t.Fatalf("put: %v", err)
@@ -634,7 +781,7 @@ func TestDBGetActiveAndImmutableShadowSSTables(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
+	db := openWithWAL(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
 	var old batch.Batch
 	if err := old.Put([]byte("k"), []byte("sstable")); err != nil {
 		t.Fatalf("put old: %v", err)
@@ -671,45 +818,6 @@ func TestDBGetActiveAndImmutableShadowSSTables(t *testing.T) {
 	}
 }
 
-func TestDBReopenRestoresSSTableCatalogAndGet(t *testing.T) {
-	dir := t.TempDir()
-	walDir := filepath.Join(dir, "wal")
-	sstDir := filepath.Join(dir, "sst")
-	w, err := wal.Open(walDir, 1)
-	if err != nil {
-		t.Fatalf("open wal: %v", err)
-	}
-	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
-	var b batch.Batch
-	if err := b.Put([]byte("persisted"), []byte("value")); err != nil {
-		t.Fatalf("put: %v", err)
-	}
-	if err := db.Write(&b); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := db.FlushOneImmutable(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	_ = db.Close()
-	_ = w.Close()
-
-	w2, err := wal.Open(walDir, 1)
-	if err != nil {
-		t.Fatalf("reopen wal: %v", err)
-	}
-	t.Cleanup(func() { _ = w2.Close() })
-	db2 := Open(w2, WithSSTableDir(sstDir))
-	t.Cleanup(func() { _ = db2.Close() })
-
-	if got := len(db2.sstables); got != 1 {
-		t.Fatalf("expected one recovered sstable, got %d", got)
-	}
-	got, ok := db2.Get([]byte("persisted"))
-	if !ok || string(got) != "value" {
-		t.Fatalf("Get after reopen=(%q,%v), want value,true", got, ok)
-	}
-}
-
 func TestDBReopenAllocatesNextSSTableNumber(t *testing.T) {
 	dir := t.TempDir()
 	walDir := filepath.Join(dir, "wal")
@@ -718,16 +826,16 @@ func TestDBReopenAllocatesNextSSTableNumber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open wal: %v", err)
 	}
-	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
-	var first batch.Batch
-	if err := first.Put([]byte("a"), []byte("1")); err != nil {
-		t.Fatalf("put first: %v", err)
+	db := openWithWAL(w, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
+	var btch batch.Batch
+	if err := btch.Put([]byte("a"), []byte("1")); err != nil {
+		t.Fatalf("put btch: %v", err)
 	}
-	if err := db.Write(&first); err != nil {
-		t.Fatalf("write first: %v", err)
+	if err := db.Write(&btch); err != nil {
+		t.Fatalf("write btch: %v", err)
 	}
 	if err := db.FlushOneImmutable(); err != nil {
-		t.Fatalf("flush first: %v", err)
+		t.Fatalf("flush btch: %v", err)
 	}
 	_ = db.Close()
 	_ = w.Close()
@@ -737,7 +845,7 @@ func TestDBReopenAllocatesNextSSTableNumber(t *testing.T) {
 		t.Fatalf("reopen wal: %v", err)
 	}
 	t.Cleanup(func() { _ = w2.Close() })
-	db2 := Open(w2, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
+	db2 := openWithWAL(w2, WithMemTableThresholdBytes(1), WithSSTableDir(sstDir))
 	t.Cleanup(func() { _ = db2.Close() })
 	if db2.nextSSTableNum != 2 {
 		t.Fatalf("expected next sstable num 2, got %d", db2.nextSSTableNum)
@@ -766,7 +874,7 @@ func TestDBManifestAppendFailureDoesNotPublishSSTable(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
+	db := openWithWAL(w, WithMemTableThresholdBytes(1), WithSSTableDir(filepath.Join(dir, "sst")))
 	var b batch.Batch
 	if err := b.Put([]byte("k"), []byte("v")); err != nil {
 		t.Fatalf("put: %v", err)
@@ -881,20 +989,15 @@ func TestOpenWithRecovery_ReplaysEntriesAndRestoresSequence(t *testing.T) {
 		t.Fatalf("close wal: %v", err)
 	}
 
-	w2, err := wal.Open(walDir, 1)
-	if err != nil {
-		t.Fatalf("reopen wal: %v", err)
-	}
-	t.Cleanup(func() { _ = w2.Close() })
-
 	var seen []uint64
-	db, stats, err := OpenWithRecovery(w2, func(e *wal.LogEntry) error {
+	db, stats, err := OpenWithRecovery(dir, func(e *wal.LogEntry) error {
 		seen = append(seen, e.SeqNum)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("open with recovery: %v", err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 	if len(seen) != 2 || seen[0] != 7 || seen[1] != 8 {
 		t.Fatalf("replay order/seq mismatch: got %v", seen)
 	}
@@ -940,16 +1043,11 @@ func TestOpenWithRecovery_UsesSeqRangeFromCount(t *testing.T) {
 		t.Fatalf("close wal: %v", err)
 	}
 
-	w2, err := wal.Open(walDir, 1)
-	if err != nil {
-		t.Fatalf("reopen wal: %v", err)
-	}
-	t.Cleanup(func() { _ = w2.Close() })
-
-	db, _, err := OpenWithRecovery(w2, nil)
+	db, _, err := OpenWithRecovery(dir, nil)
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 
 	var next batch.Batch
 	if err := next.Put([]byte("kn"), []byte("vn")); err != nil {
@@ -986,23 +1084,17 @@ func TestOpenWithRecovery_FailsOnMiddleFileCorruption(t *testing.T) {
 		t.Fatalf("read wal: %v", err)
 	}
 	// Flip one byte in the second record payload area (middle corruption).
-	// First record occupies: header(7)+payloadLen. So second record payload starts
-	// at: firstRecordEnd + header(7).
-	firstPayloadLen := int(binary.LittleEndian.Uint16(raw[4:6]))
-	firstRecordEnd := 7 + firstPayloadLen
-	secondPayloadOff := firstRecordEnd + 7
+	// btch record occupies: header(7)+payloadLen. So second record payload starts
+	// at: btchRecordEnd + header(7).
+	btchPayloadLen := int(binary.LittleEndian.Uint16(raw[4:6]))
+	btchRecordEnd := 7 + btchPayloadLen
+	secondPayloadOff := btchRecordEnd + 7
 	raw[secondPayloadOff] ^= 0xFF
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatalf("rewrite wal: %v", err)
 	}
 
-	w2, err := wal.Open(walDir, 1)
-	if err != nil {
-		t.Fatalf("reopen wal: %v", err)
-	}
-	t.Cleanup(func() { _ = w2.Close() })
-
-	_, _, err = OpenWithRecovery(w2, nil)
+	_, _, err = OpenWithRecovery(dir, nil)
 	if err == nil {
 		t.Fatalf("expected fatal recovery error for middle corruption")
 	}
@@ -1019,7 +1111,7 @@ func TestRecoverSerializesWithDBMutex(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = w.Close() })
 
-	db := Open(w)
+	db := openWithWAL(w)
 	db.mu.Lock()
 
 	done := make(chan struct{})

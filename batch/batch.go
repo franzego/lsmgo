@@ -21,7 +21,7 @@ func (b *Batch) Put(key, value []byte) error {
 		return ErrEmptyKey
 	}
 
-	if b.data == nil || len(b.data) < headerLength {
+	if len(b.data) < headerLength {
 		b.init(headerLength)
 	}
 
@@ -46,7 +46,7 @@ func (b *Batch) Delete(key []byte) error {
 		return ErrEmptyKey
 	}
 
-	if b.data == nil || len(b.data) < headerLength {
+	if len(b.data) < headerLength {
 		b.init(headerLength)
 	}
 
