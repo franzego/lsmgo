@@ -40,6 +40,59 @@ Not implemented:
 
 This is the stopping point for the first version: a small LSM with WAL, memtable, SSTable flush, and manifest recovery. Hopeful to improve it as time permits.
 
+## How To Use (Still very Immature)
+
+Open a database by passing a root directory - any path you desire. The DB creates its WAL and SSTable/manifest files under that directory:
+
+```go
+db, err := lsm.Open("/tmp/lsm-demo")
+if err != nil {
+    return err
+}
+defer db.Close()
+```
+
+For simple one-key operations, use `Put`, `Get`, and `Delete`:
+
+```go
+if err := db.Put([]byte("name"), []byte("franz")); err != nil {
+    return err
+}
+
+value, ok := db.Get([]byte("name"))
+if ok {
+    fmt.Println(string(value))
+}
+
+if err := db.Delete([]byte("name")); err != nil {
+    return err
+}
+```
+
+`Put` and `Delete` are convenience methods. Internally they create a one-operation batch and commit it through the same durable write path as every other write.
+
+For multiple keys that should commit together, build a `batch.Batch` and call `db.Write(&b)` once:
+
+```go
+var b batch.Batch
+
+if err := b.Put([]byte("k1"), []byte("v1")); err != nil {
+    return err
+}
+if err := b.Put([]byte("k2"), []byte("v2")); err != nil {
+    return err
+}
+if err := b.Put([]byte("k3"), []byte("v3")); err != nil {
+    return err
+}
+
+if err := db.Write(&b); err != nil {
+    return err
+}
+```
+
+Use `db.Put` for one-off writes. Use `batch.Batch` plus `db.Write` when several operations should share one durable commit.
+
 ## Write Path
 
 A write goes through this order:

@@ -143,6 +143,22 @@ func newDB(w walLog, cfg options) (*DB, error) {
 	return db, nil
 }
 
+func (d *DB) Put(key, value []byte) error {
+	var b batch.Batch
+	if err := b.Put(key, value); err != nil {
+		return err
+	}
+	return d.Write(&b)
+}
+
+func (d *DB) Delete(key []byte) error {
+	var b batch.Batch
+	if err := b.Delete(key); err != nil {
+		return err
+	}
+	return d.Write(&b)
+}
+
 func (d *DB) Write(b *batch.Batch) error {
 	if b == nil {
 		return ErrNilBatch
