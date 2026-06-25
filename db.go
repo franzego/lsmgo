@@ -20,7 +20,7 @@ import (
 type DB struct {
 	mu          sync.RWMutex
 	seqNum      atomic.Uint64
-	wal         *wal.WAL
+	wal         walLog
 	mem         *memtable.MemTable
 	immutables  []*memtable.MemTable
 	sstables    []string
@@ -29,6 +29,12 @@ type DB struct {
 	opts        options
 
 	nextSSTableNum uint64
+}
+
+type walLog interface {
+	WriteLogEntry([]byte) error
+	Replay(func(*wal.LogEntry) error) (wal.ReplayStats, error)
+	Close() error
 }
 
 type options struct {
@@ -68,12 +74,54 @@ var (
 	ErrCorruptBatch     = errors.New("lsm: corrupt batch")
 )
 
-func Open(w *wal.WAL, opts ...Option) *DB {
+func Open(path string, opts ...Option) (*DB, error) {
+	db, _, err := OpenWithRecovery(path, nil, opts...)
+	return db, err
+}
+
+// OpenWithRecovery opens a DB rooted at path and replays the current WAL before
+// returning. The optional apply callback observes recovered WAL entries after
+// they have been applied to the memtable.
+func OpenWithRecovery(path string, apply func(*wal.LogEntry) error, opts ...Option) (*DB, wal.ReplayStats, error) {
+	cfg := buildOptions(path, true, opts...)
+
+	w, err := wal.Open(filepath.Join(path, "wal"), 1)
+	if err != nil {
+		return nil, wal.ReplayStats{}, err
+	}
+	db, err := newDB(w, cfg)
+	if err != nil {
+		_ = w.Close()
+		return nil, wal.ReplayStats{}, err
+	}
+	stats, err := db.Recover(apply)
+	if err != nil {
+		_ = db.Close()
+		return nil, stats, err
+	}
+	return db, stats, nil
+}
+
+func openWithWAL(w walLog, opts ...Option) *DB {
+	cfg := buildOptions("", false, opts...)
+	db, _ := newDB(w, cfg)
+	return db
+}
+
+func buildOptions(rootDir string, defaultSSTableDir bool, opts ...Option) options {
 	var cfg options
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if defaultSSTableDir && !cfg.sstableDirConfigured {
+		cfg.sstableDir = filepath.Join(rootDir, "sstable")
+		cfg.sstableDirConfigured = true
+	}
 	cfg.ensureDefaults()
+	return cfg
+}
+
+func newDB(w walLog, cfg options) (*DB, error) {
 	db := &DB{
 		wal:            w,
 		mem:            memtable.NewMemtable(),
@@ -84,7 +132,7 @@ func Open(w *wal.WAL, opts ...Option) *DB {
 		m, state, err := manifest.Open(cfg.sstableDir)
 		if err != nil {
 			db.manifestErr = err
-			return db
+			return db, err
 		}
 		db.manifest = m
 		db.nextSSTableNum = state.NextFileNum
@@ -92,18 +140,7 @@ func Open(w *wal.WAL, opts ...Option) *DB {
 			db.sstables = append(db.sstables, table.Path)
 		}
 	}
-	return db
-}
-
-// OpenWithRecovery builds a DB and immediately replays the WAL.
-// The apply callback is invoked for each recovered log entry in replay order.
-func OpenWithRecovery(w *wal.WAL, apply func(*wal.LogEntry) error, opts ...Option) (*DB, wal.ReplayStats, error) {
-	db := Open(w, opts...)
-	stats, err := db.Recover(apply)
-	if err != nil {
-		return nil, stats, err
-	}
-	return db, stats, nil
+	return db, nil
 }
 
 func (d *DB) Write(b *batch.Batch) error {
@@ -259,14 +296,20 @@ func (d *DB) ensureManifestReadyLocked() error {
 }
 
 func (d *DB) Close() error {
+	var err error
 	if d.manifest != nil {
-		return d.manifest.Close()
+		err = d.manifest.Close()
 	}
-	return nil
+	if d.wal != nil {
+		if walErr := d.wal.Close(); err == nil {
+			err = walErr
+		}
+	}
+	return err
 }
 
 // Recover replays WAL entries and restores DB sequence state.
-// It is safe to call with apply == nil when only sequence restoration is needed.
+// It is safe to call with apply == nil when no external recovery observer is needed.
 func (d *DB) Recover(apply func(*wal.LogEntry) error) (wal.ReplayStats, error) {
 	if d.wal == nil {
 		return wal.ReplayStats{}, ErrWALNotConfigured
@@ -279,6 +322,22 @@ func (d *DB) Recover(apply func(*wal.LogEntry) error) (wal.ReplayStats, error) {
 		if e.Count == 0 {
 			return ErrCorruptBatch
 		}
+		ops, err := parseBatchOps(e.Data, e.Count)
+		if err != nil {
+			return err
+		}
+		for i, op := range ops {
+			seq := e.SeqNum + uint64(i)
+			switch op.opType {
+			case batch.OpTypePut:
+				d.mem.ApplyPut(op.key, op.value, seq)
+			case batch.OpTypeDelete:
+				d.mem.ApplyDelete(op.key, seq)
+			default:
+				return ErrCorruptBatch
+			}
+		}
+
 		// Recovery must restore the end of each reserved range so future writes stay monotonic.
 		lastSeq := e.SeqNum + uint64(e.Count) - 1
 		if lastSeq > maxSeq {

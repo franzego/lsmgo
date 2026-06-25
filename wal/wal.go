@@ -31,10 +31,10 @@ func parseWALName(dir string, walNum uint32) string {
 }
 
 func Open(dirpath string, walNum uint32) (*WAL, error) {
-	return OpenWithFS(dirpath, walNum, fs.DefaultFS())
+	return openWithFS(dirpath, walNum, fs.DefaultFS())
 }
 
-func OpenWithFS(dirpath string, walNum uint32, filesystem fs.FS) (*WAL, error) {
+func openWithFS(dirpath string, walNum uint32, filesystem fs.FS) (*WAL, error) {
 	if err := filesystem.MkdirAll(dirpath, 0o755); err != nil {
 		return nil, err
 	}
